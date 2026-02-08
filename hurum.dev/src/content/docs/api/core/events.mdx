@@ -1,0 +1,145 @@
+---
+title: Events
+description: "API reference for Events and Event."
+---
+
+```ts
+import { Events, Event } from '@hurum/core'
+```
+
+## `Events(prefix, definitions)`
+
+Creates a namespaced group of event creators.
+
+### Signature
+
+```ts
+function Events<TPrefix extends string, TDefs extends Record<string, EventDefinition<unknown>>>(
+  prefix: TPrefix,
+  events: TDefs,
+): EventCreatorMap<TPrefix, TDefs>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `prefix` | `string` | Namespace prefix. Becomes part of the event type string (e.g. `'Purchase'`). |
+| `events` | `Record<string, EventDefinition<T>>` | A map of event names to `Event<T>()` markers. |
+
+### Returns
+
+An object whose keys match `events`. Each value is an `EventCreator`.
+
+### Example
+
+```ts
+const PurchaseEvent = Events('Purchase', {
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: Error }>(),
+})
+
+// Create event instances
+PurchaseEvent.saved({ purchase })
+// -> { type: 'Purchase/saved', purchase: ... }
+
+// Access the type literal
+PurchaseEvent.saved.type
+// -> 'Purchase/saved' (string literal type, not string)
+```
+
+---
+
+## `Event<T>()`
+
+Type marker that defines the payload shape of an event. Used exclusively inside `Events()`.
+
+### Signature
+
+```ts
+function Event<T = {}>(): EventDefinition<T>
+```
+
+### Type Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `T` | The payload type for this event. Defaults to `{}` (no payload). |
+
+### Returns
+
+An `EventDefinition<T>` marker object. Has no runtime behavior -- it exists solely for type inference.
+
+### Example
+
+```ts
+const CartEvent = Events('Cart', {
+  itemAdded: Event<{ item: CartItem }>(),
+  cleared: Event(),  // no payload
+})
+```
+
+---
+
+## `EventCreator<TType, TPayload>`
+
+The type of each event creator produced by `Events()`. It is both a callable function and carries a `.type` property.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `type` | `TType` | The string literal type (e.g. `'Purchase/saved'`). |
+
+### Call Signature
+
+```ts
+(payload: TPayload) => EventInstance<TType, TPayload>
+```
+
+Calling the creator produces an `EventInstance` -- a plain object with `type` and the payload fields spread in.
+
+### Example
+
+```ts
+const event = PurchaseEvent.saved({ purchase: myPurchase })
+// event.type    -> 'Purchase/saved'
+// event.purchase -> myPurchase
+```
+
+---
+
+## `EventInstance<TType, TPayload>`
+
+The runtime event object. A plain object containing a `type` discriminant field and payload properties.
+
+### Shape
+
+```ts
+type EventInstance<TType extends string, TPayload> = {
+  readonly type: TType
+} & TPayload
+```
+
+Events are immutable records of facts. They are the only mechanism that changes state in a Store.
+
+---
+
+## `isEventCreator(value)`
+
+Type guard that checks if a value is an `EventCreator`.
+
+### Signature
+
+```ts
+function isEventCreator(value: unknown): value is EventCreator
+```
+
+---
+
+## Notes
+
+- Event types follow the format `'{prefix}/{name}'` (e.g. `'Purchase/saved'`).
+- Name events in past tense. They record what happened, not what should happen.
+- Events have zero runtime dependencies. Define them before commands, intents, or stores.
+- The `.type` property preserves the string literal type. It is used internally by Hurum for dispatch. In Store `.on()` handlers, use the namespace form `.on(MyEvent, { saved: handler })` or per-event form `.on(MyEvent.saved, handler)` instead of computed property keys.

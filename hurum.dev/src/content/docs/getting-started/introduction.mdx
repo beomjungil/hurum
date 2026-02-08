@@ -1,0 +1,95 @@
+---
+title: "What is Hurum?"
+description: "Hurum is a TypeScript state management library where every state change follows a single, predictable path: Intent → Command → Executor → Event → Store.on."
+---
+
+The name "Hurum" comes from the Korean word **흐름** (*heu-reum*), meaning *flow*. In Hurum, every piece of state flows through the same pipeline — that single, unbroken flow is what makes your application predictable.
+
+Hurum is a state management library for TypeScript where **every state change follows one path**:
+
+```
+Intent → Command → Executor → Event → Store.on
+```
+
+A counter increment and a complex async API call with retries and error handling go through the exact same pipeline. No shortcuts. No special cases.
+
+## Principles
+
+### Single Path
+
+All state changes flow through Intent → Command → Executor → Event → Store.on. A simple synchronous toggle and a multi-step async workflow follow the same path. This means you learn one pattern and apply it everywhere.
+
+### Encapsulation Consistency
+
+Whether it is a button click that increments a number or an API call that fetches data, validates it, and updates multiple fields — the architecture is identical. You never have to decide "should this be a reducer or an effect or middleware?" The answer is always the same pipeline.
+
+### Explicitness
+
+Events record **facts that happened**. `CounterEvent.incremented({ amount: 1 })` is a fact — the counter was incremented by 1. State transitions in `Store.on` are pure functions that react to these facts. There are no implicit mutations, no magic setters, no "just update the value directly."
+
+### Cohesion
+
+Everything that belongs to one process lives in one Store definition: state shape, event handlers, computed values, dependencies, and executors. You don't scatter your logic across separate files for reducers, selectors, middleware, and effects. One Store, one place to look.
+
+## Packages
+
+| Package | What it does |
+|---|---|
+| `@hurum/core` | Core state management. Framework-agnostic, zero runtime dependencies. Works anywhere TypeScript runs. |
+| `@hurum/react` | React bindings: `useStore`, `Store.use.*` hooks, `Provider`, `withProvider`. Peer-depends on React 18+. |
+
+Use `@hurum/core` alone if you are not using React, or if you want to share state logic across frameworks. Add `@hurum/react` when you need React component integration.
+
+## Who is Hurum for?
+
+Hurum works best when your app has:
+
+- **Complex async flows** — API calls with validation, retries, optimistic updates, rollback
+- **Multi-step processes** — Wizards, checkout flows, form submissions with side effects
+- **Nested state** — Parent-child store relationships (e.g., a todo list where each todo item has its own store)
+- **Teams that want explicit architecture** — When "where does this logic go?" should have one obvious answer
+
+## When NOT to use Hurum
+
+If you just need a global counter or a simple boolean toggle, Hurum is overkill. Use `useState`, Zustand, or Jotai for simple cases. Hurum's value comes from the predictability and structure it provides to **complex** state management — and that structure has a cost for trivial use cases.
+
+## The data flow at a glance
+
+Here is the full pipeline that every state change travels through:
+
+```
+Intent (what the user wants to do)
+  → Command (what to execute)
+    → CommandExecutor (side-effect boundary)
+      → emit(Event) (record what happened)
+        → Store.on (pure state transition)
+          → Computed (derived state, recalculated eagerly)
+            → Subscribers notified (React re-renders)
+```
+
+Each layer has one job. Intents map user actions to commands. Executors run side effects and emit events. Events are facts. Store.on handles state transitions. Computed derives values. This separation is what makes Hurum stores easy to test, debug, and reason about.
+
+## What does Hurum code look like?
+
+Here is a minimal counter — just events and a store:
+
+```ts
+import { Events, Event, Store } from '@hurum/core'
+
+// Events record facts: "the counter was incremented"
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+  reset: Event<{}>(),
+})
+
+// Store holds state and reacts to events with pure functions
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({ ...state, count: state.count + amount }),
+    reset: () => ({ count: 0 }),
+  })
+```
+
+That's it. Events define what can happen. The Store's `.on()` handlers define how state changes in response. Everything else — executors, intents, computed values, middleware — builds on this foundation.
+
+Ready to try it? [Install Hurum](/getting-started/installation/) and build your first store in the [Quick Start](/getting-started/quick-start/).

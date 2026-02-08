@@ -1,0 +1,247 @@
+---
+title: Store
+description: The Store owns state, transitions, computed values, dependencies, and executors for one process.
+---
+
+> [!TIP] Before reading
+> This page assumes familiarity with [Event](/concepts/event/), [CommandExecutor](/concepts/command-executor/), and [Intent](/concepts/intent/). Read those first if you haven't.
+
+The Store is the central unit in Hurum. It holds everything for one process: state, event handlers, computed values, executors, dependencies, relay rules, and middleware.
+
+```ts
+import { Store } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .computed({
+    canSubmit: (state) => state.purchase !== null && !state.saving,
+    totalAmount: (state) =>
+      state.purchase?.items.reduce((sum, item) => sum + item.amount, 0) ?? 0,
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor, LoadExecutor)
+  .deps({ repository: new PurchaseRepository() })
+  .middleware(logger())
+```
+
+## How it works
+
+A Store is built using a fluent builder chain. Each method adds a layer of behavior and returns a new Store definition:
+
+| Method | Purpose |
+|--------|---------|
+| `Store({ state })` | Define initial state |
+| `.on(Events, { ... })` | Register event handlers (pure state transitions) |
+| `.computed({ ... })` | Define derived state |
+| `.relay(Event, fn)` | Forward events between parent and nested child stores |
+| `.intents(...)` | Register intent namespaces |
+| `.executors(...)` | Register command executors |
+| `.deps({ ... })` | Provide dependencies for executors |
+| `.middleware(...)` | Attach read-only observers |
+
+### Event handlers with `.on`
+
+The `.on` method registers pure functions that transition state in response to events:
+
+```ts
+.on(CounterEvent, {
+  incremented: (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }),
+  reset: () => ({
+    count: 0,
+  }),
+})
+```
+
+Each handler receives the current state and the event payload, and returns the next state. Handlers must be pure -- no side effects, no async, no mutations.
+
+### Sending intents
+
+Once a Store is defined, you interact with it by sending intents:
+
+```ts
+// v2 Send API -- shorthand
+PurchaseStore.send.submitButtonClicked({ id: '123' })
+
+// v2 Send API -- PreparedIntent form
+PurchaseStore.send(PurchaseIntents.submitButtonClicked({ id: '123' }))
+```
+
+Both forms are equivalent. The shorthand is more concise for common use; the PreparedIntent form is useful when you need to pass intents around as values.
+
+### Reading state
+
+```ts
+// Get the full state (raw + computed)
+const state = PurchaseStore.getState()
+console.log(state.purchase)    // raw state
+console.log(state.canSubmit)   // computed value
+```
+
+### Subscribing to changes
+
+```ts
+// Subscribe to state changes
+const unsubscribe = PurchaseStore.subscribe((state) => {
+  console.log('State changed:', state)
+})
+
+// Subscribe to raw events
+const unsubEvents = PurchaseStore.subscribe('events', (event) => {
+  console.log('Event emitted:', event.type)
+})
+```
+
+## Singleton vs. scoped instances
+
+By default, a Store definition acts as a **global singleton**. This is convenient for client-side apps where one instance per store is the norm:
+
+```ts
+// Singleton -- same instance everywhere
+const CounterStore = Store({ state: { count: 0 } })
+  .on({ /* ... */ })
+  .intents(CounterIntents)
+  .executors(IncrementExecutor)
+
+// Use directly
+CounterStore.send.plusClicked({ amount: 1 })
+CounterStore.getState().count
+```
+
+For SSR or when you need isolated instances, use `Store.create()`:
+
+```ts
+// Scoped instance -- independent state
+const store = PurchaseStore.create({
+  initialState: { purchase: existingPurchase },
+  deps: { repository: mockRepository },
+})
+
+store.send.submitButtonClicked({ id: '123' })
+store.getState()
+```
+
+`Store.create` options:
+
+| Option | Behavior |
+|--------|----------|
+| `initialState` | Deep-merged with the Store's default state |
+| `deps` | Shallow-merged with the Store's default deps |
+
+:::caution[SSR requires scoped instances]
+Singletons are client-only. For server-side rendering, always use `Store.create()` inside a Provider to avoid state leaking between requests.
+:::
+
+## Disposal
+
+Call `store.dispose()` to clean up a store instance:
+
+```ts
+const store = PurchaseStore.create()
+
+// ... use the store ...
+
+store.dispose()
+```
+
+Disposal does the following:
+- Aborts all running executors
+- Unsubscribes all listeners
+- Disposes all nested child stores
+- Marks the store as disposed
+
+After disposal:
+- `store.send(...)` throws an error
+- `emit()` inside any still-running executor is silently ignored
+
+:::note
+Providers do **not** auto-dispose stores. This is intentional for React Strict Mode compatibility, which mounts and unmounts components during development.
+:::
+
+## Accessing nested stores
+
+If your store has [nested stores](/concepts/nested-store/), access their instances via `scope`:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    transaction: Nested(TransactionStore),
+    items: Nested.array(ItemStore),
+  },
+})
+
+// Access child store instances
+PurchaseStore.scope.transaction  // TransactionStore instance
+PurchaseStore.scope.items        // ItemStore[] instances
+```
+
+## Common patterns
+
+### Minimal store
+
+The simplest possible store:
+
+```ts
+const ToggleStore = Store({ state: { on: false } })
+  .on(ToggleEvent, {
+    toggled: (state) => ({ on: !state.on }),
+  })
+  .intents(ToggleIntents)
+  .executors(ToggleExecutor)
+```
+
+### Store with dependencies
+
+```ts
+const UserStore = Store({
+  state: { user: null as User | null, loading: false },
+})
+  .on({ /* ... */ })
+  .intents(UserIntents)
+  .executors(LoadUserExecutor, UpdateUserExecutor)
+  .deps({
+    api: new UserApi(),
+    analytics: new AnalyticsService(),
+  })
+```
+
+### Multiple `.on` calls
+
+You can chain `.on` multiple times. Handlers are merged:
+
+```ts
+const MyStore = Store({ state: { /* ... */ } })
+  .on(EventA, (state, payload) => ({ /* ... */ }))
+  .on(EventB, (state, payload) => ({ /* ... */ }))
+```
+
+## Tips
+
+- **One store per process.** A "purchase editor," a "user profile," a "search panel" -- each gets its own store. Don't put unrelated state in the same store.
+- **Keep `.on` handlers simple.** They should be one-liners or near it. Complex logic belongs in executors (before emitting) or computed values (after state changes).
+- **Use `Store.create()` for tests.** Even if your production code uses singletons, tests should use scoped instances so they don't leak state between test cases.
+- **Always call `dispose()` in tests.** After each test, dispose the store to cancel any running executors and prevent memory leaks.

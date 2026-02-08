@@ -1,0 +1,258 @@
+---
+title: "Migration Guide"
+description: "Migrate from Flux/Redux/Zustand architectures to Hurum."
+---
+
+If you are coming from Redux, Zustand, MobX, or a custom Flux architecture, this guide maps the concepts you already know to Hurum's equivalents and walks through a practical migration strategy.
+
+## Concept mapping
+
+| Your current architecture | Hurum equivalent | Notes |
+|---|---|---|
+| Action / ActionType | **Intent** | Intents declare *what the user wants to do*, not what should happen. |
+| Action Creator | **Intent + Command** | `Intent(ValidateCommand, SaveCommand)` bundles the commands to run. |
+| Reducer | **Store.on** | Pure state transitions keyed by event type. |
+| Thunk / Saga / Epic | **CommandExecutor** | All async logic and side effects live here. |
+| Selector / Derived state | **Computed** | `.computed({ key: (state) => value })`. Recalculated eagerly on state change. |
+| Middleware | **Middleware** | `onEvent`, `onStateChange`, `onIntentStart`, `onIntentEnd`, `onError` hooks. |
+| Store (Redux) | **Store** | Contains state, reducers, computed, intents, executors, and deps. Everything in one definition. |
+| dispatch() | **store.send()** | `store.send.intentName(payload)` or `store.send(PreparedIntent)`. |
+| useSelector() | **store.use.key()** | Per-field hook. Only re-renders when that field changes. |
+| Provider (Redux) | **Store.Provider** | Used for SSR and scoped instances. Global singleton does not need a Provider. |
+
+## The key difference
+
+In Redux-style architectures, an action might trigger a reducer, a middleware, a saga, and a selector all at once. Side effects can happen in thunks, middleware, or sagas -- there are multiple paths.
+
+In Hurum, there is one path: **Intent -> Command -> Executor -> Event -> Store.on -> Computed**. Every state change, sync or async, follows this exact pipeline.
+
+## Migration strategy
+
+Do not rewrite everything at once. Migrate one domain process at a time.
+
+### Phase 1: Wrap existing logic in executors
+
+Start by wrapping your existing UseCase, service, or thunk logic inside a CommandExecutor. This lets you adopt Hurum's architecture without rewriting your business logic.
+
+```ts
+import { CommandExecutor, Events, Event } from '@hurum/core'
+
+// Your existing UseCase class stays the same
+interface SavePurchaseUseCase {
+  execute(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+}
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+// Phase 1: Executor wraps the existing UseCase
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { saveUseCase: SavePurchaseUseCase }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.saveUseCase.execute(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+Your UseCase still does the actual work. The executor just bridges it into Hurum's event-driven flow.
+
+### Phase 2: Direct implementation
+
+Once the store is working and tested, replace the UseCase wrapper with direct dependency calls:
+
+```ts
+// Phase 2: Executor calls the repository directly
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+The executor function is the same shape. You just changed what goes into `deps`. The store definition, intents, events, and React components stay untouched.
+
+## Step-by-step: migrating one process
+
+Let's walk through migrating a "save purchase" flow from a Redux-style architecture.
+
+### Step 1: Identify the domain process
+
+Pick one user action that triggers state changes and side effects. For example: "User clicks Save on a purchase form."
+
+In your current code, this might involve:
+- A `SAVE_PURCHASE_REQUEST` action
+- A thunk or saga that calls the API
+- A `SAVE_PURCHASE_SUCCESS` / `SAVE_PURCHASE_FAILURE` action
+- Reducer cases for each action
+- Selectors for `isSaving` and `saveError`
+
+### Step 2: Define events
+
+Map your existing actions to events. Events are past tense facts:
+
+```ts
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),        // was SAVE_PURCHASE_REQUEST
+  saved: Event<{ purchase: Purchase }>(),         // was SAVE_PURCHASE_SUCCESS
+  saveFailed: Event<{ error: SaveError }>(),      // was SAVE_PURCHASE_FAILURE
+})
+```
+
+### Step 3: Wrap your existing logic
+
+Take your thunk/saga and put it inside an executor. Inject the same dependencies:
+
+```ts
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { saveUseCase: SavePurchaseUseCase }  // Same dependency as your thunk
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+  const result = await deps.saveUseCase.execute(command.purchase)
+  if (signal.aborted) return
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+### Step 4: Define the store
+
+Translate your reducer cases into `on` handlers:
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor)
+  .deps<{ saveUseCase: SavePurchaseUseCase }>()
+```
+
+### Step 5: Replace component hooks
+
+Swap out `useSelector` / `useDispatch` for Hurum's hooks:
+
+```tsx
+// Before (Redux-style)
+function SaveButton() {
+  const dispatch = useDispatch()
+  const saving = useSelector(selectIsSaving)
+  const error = useSelector(selectSaveError)
+
+  return (
+    <button onClick={() => dispatch(savePurchase(purchase))} disabled={saving}>
+      Save
+    </button>
+  )
+}
+
+// After (Hurum)
+function SaveButton() {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+  const error = store.use.error()
+
+  return (
+    <button onClick={() => store.send.saveClicked({ purchase })} disabled={saving}>
+      Save
+    </button>
+  )
+}
+```
+
+> [!TIP]
+> You can run old Redux components and new Hurum components side by side during migration. They are completely independent. Migrate one page or one feature at a time.
+
+## Common pitfalls
+
+### Don't map actions 1:1 to intents
+
+In Redux, you might have dozens of action types. In Hurum, intents represent **user actions** (what the user clicked, what page they opened), not internal operations. Many Redux actions map to events, not intents.
+
+```ts
+// Redux had separate actions for:
+// SAVE_PURCHASE_REQUEST, SAVE_PURCHASE_SUCCESS, SAVE_PURCHASE_FAILURE
+
+// Hurum has one intent (what the user did):
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+// And three events (what happened as a result):
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+### Don't skip the event layer
+
+It might be tempting to call `setState` directly from an executor. Resist. Always emit events, even for simple operations. This is what makes Hurum stores predictable and testable.
+
+### Don't put business logic in on handlers
+
+`on` handlers should be pure state transitions. If you find yourself making API calls or computing complex derived data in an `on` handler, move that logic to an executor or a computed value.
+
+## Migration checklist
+
+For each domain process you migrate:
+
+- [ ] Identify the user actions and side effects
+- [ ] Define events (past tense facts: requested, succeeded, failed)
+- [ ] Create executors (wrap existing logic first, refactor later)
+- [ ] Define intents (one per user action)
+- [ ] Build the store (state + on handlers + computed + executors + deps)
+- [ ] Write tests using TestStore
+- [ ] Replace component hooks (useSelector -> store.use.key(), dispatch -> store.send)
+- [ ] Remove old Redux/Flux code for this process

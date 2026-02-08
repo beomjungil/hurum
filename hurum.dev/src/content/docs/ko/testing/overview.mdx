@@ -1,0 +1,99 @@
+---
+title: "테스트 개요"
+description: "Hurum Store의 모든 레이어를 위한 다섯 가지 테스트 유틸리티예요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Hurum은 아키텍처의 각 레이어를 대상으로 하는 다섯 가지 테스트 유틸리티를 제공해요. `@hurum/core/testing`에 있으며, Vitest, Jest 등 어떤 테스트 러너에서든 작동해요.
+
+```ts
+import { TestStore, TestExecutor, TestReducer, TestComputed, TestIntent } from '@hurum/core/testing'
+```
+
+## 다섯 가지 유틸리티
+
+| 유틸리티 | 테스트 대상 | 레벨 |
+|---------|---------------|-------|
+| [TestStore](/ko/testing/test-store/) | 전체 흐름: Intent에서 Event를 거쳐 State까지 | 통합 |
+| [TestExecutor](/ko/testing/test-executor/) | Executor 사이드 이펙트와 emit된 Event | 단위 |
+| [TestReducer](/ko/testing/test-reducer/) | `.on()` 핸들러 순수 함수 | 단위 |
+| [TestComputed](/ko/testing/test-computed/) | Computed 파생 상태 계산 | 단위 |
+| [TestIntent](/ko/testing/test-intent/) | Intent Command 구성과 실행 모드 | 단위 |
+
+## 권장 테스트 순서
+
+파이프라인의 하단에서 시작해서 위로 올라가요:
+
+### 1. TestReducer와 TestComputed (순수 함수)
+
+Store의 가장 간단한 부분을 테스트해요 -- 의존성이 없는 순수 함수. 동기적으로 실행되며 사이드 이펙트에 접근하지 않아요.
+
+```ts
+const reducer = TestReducer(PurchaseStore)
+const next = reducer.apply(initialState, PurchaseEvent.saved({ purchase }))
+expect(next.saving).toBe(false)
+```
+
+```ts
+const computed = TestComputed(PurchaseStore, 'totalAmount')
+expect(computed.evaluate({ items: [{ amount: 100 }, { amount: 200 }] })).toBe(300)
+```
+
+### 2. TestExecutor (격리된 사이드 이펙트)
+
+각 Executor를 목 deps로 독립적으로 테스트해요. 올바른 Event가 올바른 순서로 emit되는지 확인해요.
+
+```ts
+const executor = TestExecutor(SaveExecutor, {
+  deps: { repo: mockRepo },
+})
+await executor.run({ id: '123' })
+executor.assertEmitted([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+### 3. TestStore (전체 통합)
+
+전체 흐름을 테스트해요: Intent를 보내고, Event가 emit되었는지 확인하고, 최종 상태를 검증해요.
+
+```ts
+const store = TestStore(PurchaseStore, {
+  deps: { repo: mockRepo },
+})
+await store.send.submitClicked({ id: '123' })
+store.assertState({ saving: false, purchase: savedPurchase })
+store.assertNoRunningExecutors()
+```
+
+## 무엇을 어디서 테스트할지
+
+| 질문 | 유틸리티 |
+|----------|---------|
+| "이 Event에 대해 리듀서가 올바른 상태를 만드는가?" | TestReducer |
+| "Computed 값이 정확히 계산되는가?" | TestComputed |
+| "Executor가 올바른 Event를 emit하는가?" | TestExecutor |
+| "Executor가 에러를 올바르게 처리하는가?" | TestExecutor |
+| "Intent가 올바른 Command를 연결하는가?" | TestIntent |
+| "전체 흐름이 올바른 최종 상태를 만드는가?" | TestStore |
+| "Event가 올바른 순서로 올바른 중간 상태와 함께 emit되는가?" | TestStore |
+
+## 프레임워크 의존성 없음
+
+다섯 가지 유틸리티 모두 `@hurum/core/testing`의 일부예요 -- React 의존성이 없어요. 상태 관리 로직을 테스트하는 거지, UI를 테스트하는 게 아니에요.
+
+Hurum Store를 사용하는 React 컴포넌트를 테스트하려면, 일반적인 React 테스트 도구 (React Testing Library 등)를 Provider와 `Store.create()`와 함께 사용하세요.
+
+<Aside type="tip">
+  TestStore의 `send()`는 비동기예요 -- 해결 전에 내부적으로 마이크로태스크를 플러시하므로, 비동기 Executor가 assert 전에 완료돼요. 단위 레벨 유틸리티 (TestReducer, TestComputed, TestIntent)는 모두 동기적이에요.
+</Aside>
+
+## 다음 단계
+
+- [TestStore](/ko/testing/test-store/) -- 전체 Store 흐름 통합 테스트
+- [TestExecutor](/ko/testing/test-executor/) -- Executor 단위 테스트
+- [TestReducer](/ko/testing/test-reducer/) -- on() 핸들러 단위 테스트
+- [TestComputed](/ko/testing/test-computed/) -- Computed 값 단위 테스트
+- [TestIntent](/ko/testing/test-intent/) -- Intent 구성 검사

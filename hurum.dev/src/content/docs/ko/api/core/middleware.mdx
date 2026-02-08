@@ -1,0 +1,216 @@
+---
+title: Middleware
+description: "Middleware 인터페이스와 내장 middleware의 API 레퍼런스예요."
+---
+
+```ts
+import { logger, persist, devtools, undoRedo } from '@hurum/core'
+```
+
+Middleware는 Store 생명주기 이벤트를 관찰해요. Middleware는 읽기 전용으로, 상태를 수정하거나 Event를 발행해서는 안 돼요.
+
+## `Middleware` 인터페이스
+
+```ts
+type Middleware = {
+  name: string
+  onEvent?: (event: EventInstance, state: Record<string, unknown>) => void
+  onStateChange?: (prev: Record<string, unknown>, next: Record<string, unknown>) => void
+  onIntentStart?: (intent: IntentDescriptor, payload: unknown) => void
+  onIntentEnd?: (intent: IntentDescriptor, payload: unknown) => void
+  onError?: (error: Error, context: { intent: IntentDescriptor; payload?: unknown; command?: Command }) => void
+}
+```
+
+### 훅
+
+| 훅 | 호출 시점 |
+|------|---------------|
+| `onEvent` | Event가 Store에 적용된 후. Event와 새 상태를 받아요. |
+| `onStateChange` | 상태 변경 후. 이전 및 다음 상태를 받아요. |
+| `onIntentStart` | Intent 실행이 시작될 때. |
+| `onIntentEnd` | Intent가 완료될 때 (성공 또는 실패). |
+| `onError` | Executor가 오류를 던질 때. 오류와 컨텍스트 (Intent, 페이로드, Command)를 받아요. |
+
+### 커스텀 Middleware 예제
+
+```ts
+const analytics: Middleware = {
+  name: 'analytics',
+  onIntentStart: (intent, payload) => {
+    trackEvent('intent_started', { mode: intent.mode })
+  },
+  onError: (error) => {
+    reportError(error)
+  },
+}
+
+const MyStore = Store({ state: { ... } })
+  .middleware(analytics)
+```
+
+---
+
+## `MiddlewareFactory`
+
+`Middleware` 객체를 직접 제공하는 대신 사용할 수 있는 대안이에요. 팩토리 패턴은 middleware에 설정 옵션이 필요할 때 유용해요.
+
+```ts
+interface MiddlewareFactory {
+  create(): Middleware
+  readonly name: string
+}
+```
+
+`.middleware()`는 `Middleware`와 `MiddlewareFactory` 모두 받을 수 있어요.
+
+---
+
+## 내장 Middleware
+
+### `logger(options?)`
+
+콘솔 로깅 middleware예요. Event, 상태 변경, Intent 생명주기, 오류를 로깅해요.
+
+```ts
+function logger(options?: LoggerOptions): Middleware
+```
+
+| 옵션 | 타입 | 설명 |
+|--------|------|-------------|
+| `filter` | `(event: EventInstance) => boolean` | 필터를 통과하는 Event만 로깅해요. |
+
+```ts
+import { logger } from '@hurum/core'
+
+const MyStore = Store({ state: { count: 0 } })
+  .middleware(logger({ filter: (e) => !e.type.startsWith('Timer/') }))
+```
+
+---
+
+### `persist(options)`
+
+영속성 middleware예요. 상태 변경 시마다 스토리지에 상태를 저장해요. middleware와 하이드레이션 함수가 포함된 핸들을 반환해요.
+
+```ts
+function persist(options: PersistOptions): PersistHandle
+```
+
+**`PersistOptions`**
+
+| 옵션 | 타입 | 기본값 | 설명 |
+|--------|------|---------|-------------|
+| `key` | `string` | -- | 스토리지 키. 필수. |
+| `storage` | `Pick<Storage, 'getItem' \| 'setItem'>` | `localStorage` | 스토리지 백엔드. |
+| `serialize` | `(state) => string` | `JSON.stringify` | 커스텀 직렬화기. |
+| `deserialize` | `(raw: string) => Record<string, unknown>` | `JSON.parse` | 커스텀 역직렬화기. |
+| `pick` | `string[]` | -- | 이 상태 키만 영속화해요. |
+
+**`PersistHandle`**
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `middleware` | `Middleware` | 등록할 middleware 인스턴스. |
+| `getPersistedState` | `() => Record<string, unknown> \| null` | 스토리지에서 마지막 영속화된 상태를 읽어요. |
+
+```ts
+import { persist } from '@hurum/core'
+
+const storage = persist({ key: 'my-store', pick: ['todos', 'settings'] })
+
+const MyStore = Store({ state: { todos: [], settings: {} } })
+  .middleware(storage.middleware)
+
+// Hydrate from storage on startup
+const store = MyStore.create({
+  initialState: storage.getPersistedState() ?? undefined,
+})
+```
+
+---
+
+### `devtools(options?)`
+
+Redux DevTools Extension 연동이에요. 검사를 위해 Event와 상태를 브라우저 확장 프로그램에 전송해요.
+
+```ts
+function devtools(options?: DevToolsOptions): DevToolsHandle
+```
+
+**`DevToolsOptions`**
+
+| 옵션 | 타입 | 기본값 | 설명 |
+|--------|------|---------|-------------|
+| `name` | `string` | `'Hurum Store'` | DevTools 패널에 표시할 이름. |
+
+**`DevToolsHandle`**
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `middleware` | `Middleware` | 등록할 middleware 인스턴스. |
+| `connect` | `(store: { getState: () => Record<string, unknown> }) => void` | DevTools 연결을 초기화하려면 `Store.create()` 이후에 호출하세요. |
+
+```ts
+import { devtools } from '@hurum/core'
+
+const dt = devtools({ name: 'Cart' })
+
+const CartStore = Store({ state: { items: [] } })
+  .middleware(dt.middleware)
+
+const store = CartStore.create()
+dt.connect(store)
+```
+
+---
+
+### `undoRedo(options?)`
+
+실행 취소/다시 실행 middleware예요. 앱 내 시간 여행을 위해 상태 이력을 추적해요.
+
+```ts
+function undoRedo(options?: UndoRedoOptions): UndoRedoHandle
+```
+
+**`UndoRedoOptions`**
+
+| 옵션 | 타입 | 기본값 | 설명 |
+|--------|------|---------|-------------|
+| `maxHistory` | `number` | `50` | 유지할 상태 스냅샷의 최대 개수. |
+
+**`UndoRedoHandle`**
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `middleware` | `Middleware` | 등록할 middleware 인스턴스. |
+| `undo` | `() => Record<string, unknown> \| null` | 이전 상태를 복원해요. 시작 지점이면 `null`을 반환해요. |
+| `redo` | `() => Record<string, unknown> \| null` | 다음 상태를 복원해요. 끝 지점이면 `null`을 반환해요. |
+| `canUndo` | `() => boolean` | 실행 취소 작업이 가능한지 여부. |
+| `canRedo` | `() => boolean` | 다시 실행 작업이 가능한지 여부. |
+| `getHistory` | `() => readonly Record<string, unknown>[]` | 전체 상태 이력. |
+| `getPosition` | `() => number` | 이력에서의 현재 위치. |
+
+```ts
+import { undoRedo } from '@hurum/core'
+
+const history = undoRedo({ maxHistory: 30 })
+
+const EditorStore = Store({ state: { content: '' } })
+  .middleware(history.middleware)
+
+const store = EditorStore.create()
+
+// Later, in response to user actions:
+const prevState = history.undo()
+const nextState = history.redo()
+```
+
+---
+
+## 참고사항
+
+- Middleware 훅은 등록 순서대로 동기적으로 호출돼요.
+- Middleware는 순수하게 관찰만 해요. Middleware에서 상태를 변경하거나 Event를 발행하는 것은 지원되지 않으며 정의되지 않은 동작을 유발해요.
+- 여러 middleware 인스턴스를 `.middleware(a, b, c)` 또는 체이닝 `.middleware(a).middleware(b)`로 등록할 수 있어요.
+- 핸들을 반환하는 내장 middleware (persist, devtools, undoRedo)는 middleware 인스턴스와 제어 API를 분리해요. `.middleware` 속성을 등록하고 핸들로 상호작용하세요.

@@ -1,0 +1,222 @@
+---
+title: "Intent Cancellation"
+description: "Cancel running operations with signal, cancel(), and cancelAll()."
+---
+
+> [!TIP] Before reading
+> This guide builds on [Intent](/concepts/intent/) and [CommandExecutor](/concepts/command-executor/). Read those first if you haven't.
+
+Long-running operations need a way to stop. A user might click "Cancel", navigate away, or submit a new request that makes the previous one irrelevant. Hurum provides three cancellation mechanisms, all built on `AbortSignal`.
+
+## The signal in executors
+
+Every executor receives a `signal` in its context. This is a standard `AbortSignal` that gets aborted when the intent is cancelled:
+
+```ts
+const [SearchCommand, SearchExecutor] = CommandExecutor<
+  { query: string },
+  { searchApi: SearchApi }
+>(async (command, { deps, emit, signal }) => {
+  emit(SearchEvent.searchStarted({ query: command.query }))
+
+  if (signal.aborted) return
+
+  const results = await deps.searchApi.search(command.query, { signal })
+
+  if (signal.aborted) return
+
+  emit(SearchEvent.searchCompleted({ results }))
+})
+```
+
+Check `signal.aborted` before and after every `await`. You can also pass `signal` directly to APIs that support `AbortSignal` (like `fetch`), so the underlying network request gets cancelled too.
+
+## Three ways to cancel
+
+### 1. cancel(ref) -- Cancel a specific intent
+
+`store.send()` returns an `IntentRef`. Pass it to `store.cancel()` to abort that specific execution:
+
+```ts
+// Start the operation
+const ref = store.send.searchStarted({ query: 'shoes' })
+
+// Later, cancel just this one
+store.cancel(ref)
+```
+
+This is useful when you have multiple concurrent operations and want to cancel one without affecting others.
+
+### 2. cancelAll() -- Cancel everything
+
+`store.cancelAll()` aborts every running executor:
+
+```ts
+store.cancelAll()
+```
+
+Use this when the user navigates away or when you need to reset the entire store's async state.
+
+### 3. Re-sending the same intent type
+
+When you send a new intent, any previous execution of that same intent is **not** automatically cancelled. Each `send()` creates an independent execution. If you want "only the latest request wins" behavior, cancel the previous one explicitly:
+
+```ts
+let lastSearchRef: IntentRef | null = null
+
+function handleSearchInput(query: string) {
+  if (lastSearchRef) store.cancel(lastSearchRef)
+  lastSearchRef = store.send.searchStarted({ query })
+}
+```
+
+## The cancel button pattern
+
+Here is a complete example: a form with a save button and a cancel button.
+
+### Events and executor
+
+```ts
+import { Events, Event, CommandExecutor, Intents, Intent, Store } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+  cancelled: Event(),
+})
+
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+
+const [CancelCommand, CancelExecutor] = CommandExecutor<
+  {}
+>((command, { emit }) => {
+  emit(PurchaseEvent.cancelled(command))
+})
+```
+
+### Intents and store
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(SavePurchaseCommand),
+  cancelClicked: Intent(CancelCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+    cancelled: (state) => ({
+      ...state,
+      saving: false,
+      error: null,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SavePurchaseExecutor, CancelExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+### React component
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function PurchaseForm({ purchase }: { purchase: Purchase }) {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+
+  const handleSubmit = () => {
+    store.send.submitButtonClicked({ purchase })
+  }
+
+  const handleCancel = () => {
+    store.cancelAll()
+    store.send.cancelClicked({})
+  }
+
+  return (
+    <div>
+      <button onClick={handleSubmit} disabled={saving}>
+        {saving ? 'Saving...' : 'Submit'}
+      </button>
+      {saving && (
+        <button onClick={handleCancel}>Cancel</button>
+      )}
+    </div>
+  )
+}
+```
+
+The cancel handler does two things:
+1. `store.cancelAll()` aborts the running save executor's signal
+2. `store.send.cancelClicked({})` sends a cancel intent that resets the state
+
+This two-step approach is intentional. `cancelAll()` only aborts signals -- it does not change state. You need to send a separate intent to update the state, because state changes must always flow through events.
+
+## Passing signal to fetch
+
+If your dependency uses `fetch` or any API that accepts `AbortSignal`, pass it through:
+
+```ts
+const [FetchCommand, FetchExecutor] = CommandExecutor<
+  { url: string },
+  { httpClient: { get(url: string, options: { signal: AbortSignal }): Promise<Response> } }
+>(async (command, { deps, emit, signal }) => {
+  emit(FetchEvent.started({ url: command.url }))
+
+  try {
+    const response = await deps.httpClient.get(command.url, { signal })
+    if (signal.aborted) return
+    const data = await response.json()
+    emit(FetchEvent.completed({ data }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(FetchEvent.failed({ error: (error as Error).message }))
+  }
+})
+```
+
+When the signal is aborted, `fetch` throws an `AbortError`. The catch block checks `signal.aborted` and returns silently, so no failure event is emitted for cancellations.
+
+## Key points
+
+- **Always check `signal.aborted` in async executors.** Check before and after every `await` point.
+- **`cancelAll()` aborts signals but does not change state.** Send a separate cancel intent to reset your state.
+- **`cancel(ref)` targets a specific execution.** Use the `IntentRef` returned by `store.send()`.
+- **Pass `signal` to underlying APIs.** This cancels the actual network request, not just the handler.
+- **Cancellation is silent.** After `signal.aborted` is true, the executor should return without emitting any more events. The store state remains at whatever point it was before the cancellation.

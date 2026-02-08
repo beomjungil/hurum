@@ -1,0 +1,218 @@
+---
+title: "useStore"
+description: "The context-aware hook that resolves the right store instance for your component."
+---
+
+## Why useStore exists
+
+`useStore()` is the primary way to access a store in React. It is **context-aware**: it checks for a `StoreProvider`, uses the scoped instance if found, and falls back to the singleton if not. Your component code stays the same regardless of which context it runs in.
+
+```tsx
+import { useStore } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+function PurchaseInfo() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h2>{purchase?.name}</h2>
+      {saving && <p>Saving...</p>}
+    </div>
+  )
+}
+```
+
+This component works inside a `StoreProvider` (reads scoped instance) and outside one (reads singleton). The caller decides which context to provide — the component does not care.
+
+## Two overloads
+
+`useStore` has two call signatures:
+
+### useStore(definition)
+
+Pass a store definition. The hook resolves the instance from context or singleton fallback.
+
+```tsx
+const store = useStore(PurchaseStore)
+```
+
+**Resolution order:**
+1. **Inside a `StoreProvider` for this definition** — returns the scoped instance from context
+2. **Outside a `StoreProvider`** — returns the global singleton (created on first access)
+
+This means you can build a component once and use it in both contexts:
+
+```tsx
+// Scoped: each form has its own state
+<StoreProvider of={PurchaseStore} store={storeA}>
+  <PurchaseInfo />  {/* reads storeA */}
+</StoreProvider>
+
+// Singleton: quick prototype, no Provider needed
+<PurchaseInfo />  {/* reads global singleton */}
+```
+
+### useStore(instance)
+
+Pass a store instance directly. The hook uses that instance without checking context. This is useful when you already have a reference to a specific store instance — for example, a child store from a parent's `scope`.
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function ItemRow({ store: itemStore }: { store: StoreInstance }) {
+  const store = useStore(itemStore)
+  const name = store.use.name()
+  const price = store.use.price()
+
+  return (
+    <div>
+      <span>{name}</span>
+      <span>${price}</span>
+    </div>
+  )
+}
+```
+
+This overload is particularly useful with nested stores, where the parent exposes child instances via `scope`:
+
+```tsx
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const itemStores = store.scope.items  // StoreInstance[] from Nested.array
+
+  return (
+    <ul>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+    </ul>
+  )
+}
+
+function ItemRow({ store: itemStore }: { store: StoreInstance }) {
+  // Pass the instance directly — no Provider needed for the child
+  const store = useStore(itemStore)
+  const name = store.use.name()
+  const price = store.use.price()
+
+  return (
+    <li>
+      <input
+        value={name}
+        onChange={(e) => store.send.nameEdited({
+          id: store.getState().id, name: e.target.value
+        })}
+      />
+      <span>${price}</span>
+    </li>
+  )
+}
+```
+
+> [!TIP]
+> Use `useStore(instance)` when you receive a store instance as a prop — typically from a parent's `scope`. Use `useStore(Def)` when you want context-aware resolution or singleton fallback.
+
+## The returned handle
+
+`useStore()` returns a handle with hooks, dispatch, and the full store API:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `use` | `{ [field]: () => value }` | Per-field hooks for state and computed values |
+| `useSelector(fn)` | `(fn) => T` | Derived state with structural equality |
+| `send` | `SendFn` | Dispatch intents |
+| `cancel(ref)` | `(ref) => void` | Cancel a specific running intent |
+| `cancelAll()` | `() => void` | Cancel all running intents |
+| `getState()` | `() => State` | Read the full current state |
+| `subscribe(cb)` | `(cb) => unsubscribe` | Subscribe to state changes |
+| `dispose()` | `() => void` | Dispose the store instance |
+| `scope` | `ScopeOf<State>` | Access nested child store instances |
+
+### use.fieldName()
+
+Each field on your store's state (including computed values) gets its own hook. The hook subscribes to just that field — changes to other fields do not trigger a re-render.
+
+```tsx
+function CounterDisplay() {
+  const store = useStore(CounterStore)
+  const count = store.use.count()       // re-renders when count changes
+  const doubled = store.use.doubled()   // re-renders when doubled changes
+  // Does NOT re-render when multiplier changes
+
+  return <p>{count} (doubled: {doubled})</p>
+}
+```
+
+This granularity is built in. You do not need to write selector functions for basic field access.
+
+### useSelector
+
+For derived state that combines multiple fields, `useSelector` prevents unnecessary re-renders by comparing the return value structurally:
+
+```tsx
+function PurchaseSummary() {
+  const store = useStore(PurchaseStore)
+
+  const summary = store.useSelector((state) => ({
+    name: state.purchase?.name,
+    total: state.totalAmount,
+    itemCount: state.purchase?.items.length ?? 0,
+  }))
+
+  // Only re-renders when name, total, or itemCount actually change
+  return (
+    <div>
+      <h3>{summary.name}</h3>
+      <p>{summary.itemCount} items, ${summary.total}</p>
+    </div>
+  )
+}
+```
+
+The selector runs on every state change, but the component only re-renders when the returned value differs structurally from the previous one.
+
+### send
+
+Dispatch intents in three equivalent styles:
+
+```tsx
+// Named shorthand
+store.send.submitClicked({ id: '123' })
+
+// PreparedIntent
+store.send(PurchaseIntents.submitClicked({ id: '123' }))
+
+// Descriptor + payload
+store.send(PurchaseIntents.submitClicked, { id: '123' })
+```
+
+### scope
+
+Access nested child store instances for rendering or delegation:
+
+```tsx
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const itemStores = store.scope.items  // StoreInstance[] for Nested.array
+
+  return (
+    <ul>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+    </ul>
+  )
+}
+```
+
+> [!CAUTION]
+> `useStore()` is a hook. Follow the [Rules of Hooks](https://react.dev/reference/rules/rules-of-hooks) — call it at the top level of your component, not inside conditions or loops.
+
+## Next steps
+
+- [Singleton Fallback](/react/static-api/) — How singleton access works when no Provider is present
+- [Provider & withProvider](/react/provider/) — Creating scoped instances and why you need them
+- [Scoped Instances](/react/scoped-instances/) — Store.create(), disposal, and SSR

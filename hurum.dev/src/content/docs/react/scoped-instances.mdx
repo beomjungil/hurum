@@ -1,0 +1,216 @@
+---
+title: "Scoped Instances"
+description: "Store.create(), lifecycle management, and why scoped instances are necessary."
+---
+
+## What a scoped instance is
+
+A scoped instance is a store created with `Store.create()`. It has its own state, its own subscriptions, its own running executors, and its own nested child stores. It is completely independent from every other instance of the same store — including the global singleton.
+
+You need scoped instances whenever the singleton is not enough:
+- **Multiple independent copies** of the same store (charts, forms, widgets)
+- **Server data** that initializes each instance differently
+- **Custom dependencies** per instance (real API vs. mock, per-request auth tokens)
+- **SSR** where each request must have its own state
+- **Testing** where you need isolated, reproducible setups
+
+## Store.create(options?)
+
+```ts
+const store = PurchaseStore.create({
+  initialState: { purchase: serverData, saving: false },
+  deps: { repository: new PurchaseRepository() },
+})
+```
+
+### Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `initialState` | `Partial<RawState>` | Store defaults | Deep merged with the store's default state |
+| `deps` | `Partial<Deps>` | Store defaults | Shallow merged with the store's default deps |
+
+Both are optional. `Store.create()` with no arguments uses the store's default state and deps.
+
+### Deep merge for initialState
+
+You only provide the fields you want to override. Nested objects are recursively merged:
+
+```ts
+// Store default: { user: null, settings: { theme: 'light', language: 'en' } }
+const store = SettingsStore.create({
+  initialState: { settings: { theme: 'dark' } },
+})
+
+store.getState()
+// { user: null, settings: { theme: 'dark', language: 'en' } }
+// 'language' preserved from defaults, 'theme' overridden
+```
+
+### Shallow merge for deps
+
+Each top-level dep key replaces the default entirely. Other keys are preserved:
+
+```ts
+// Store has deps: { repository: defaultRepo, analytics: defaultAnalytics }
+const store = PurchaseStore.create({
+  deps: { repository: mockRepo },
+  // analytics still uses defaultAnalytics
+})
+```
+
+This makes it easy to swap one dependency for testing without touching others.
+
+---
+
+## Use cases
+
+### Per-page state with server data
+
+A product page receives data from the server. Each navigation to a different product creates a fresh store with that product's data. No leftover state from the previous page.
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+
+function ProductPage({ product }: { product: Product }) {
+  const [store] = useState(() => ProductStore.create({
+    initialState: { product },
+    deps: { api: new ProductApi(product.storeId) },
+  }))
+
+  return (
+    <StoreProvider of={ProductStore} store={store}>
+      <ProductContent />
+    </StoreProvider>
+  )
+}
+```
+
+### Nested stores with independent parent instances
+
+When a store uses `Nested.array` or `Nested.map`, each parent instance manages its own set of child stores. Creating two parent instances gives you two fully independent hierarchies:
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+
+// Each PurchaseForm gets its own PurchaseStore with its own ItemStore children
+function App() {
+  return (
+    <>
+      <PurchaseForm serverData={order123} />
+      <PurchaseForm serverData={newDraft} />
+    </>
+  )
+}
+
+function PurchaseForm({ serverData }: { serverData: Purchase }) {
+  const [store] = useState(() => PurchaseStore.create({
+    initialState: { id: serverData.id, items: serverData.items },
+  }))
+  // Hurum auto-creates child ItemStore instances for each item in the array
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+```
+
+### SSR — per-request instances
+
+On the server, there is no global singleton. Each request serves a different user with different data. You must create a new instance per request:
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+
+function ServerPage({ data }: { data: PageData }) {
+  const store = PurchaseStore.create({
+    initialState: { purchase: data.purchase },
+    deps: { repository: new ServerPurchaseRepository(data.token) },
+  })
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+```
+
+> [!CAUTION]
+> Never access the global singleton on the server. Singletons persist across requests, which causes state leakage between users. Always use `Store.create()` + `StoreProvider` for SSR.
+
+### Testing
+
+`Store.create()` gives you full control over initial state and mocked dependencies, making tests isolated and reproducible. See [TestStore](/testing/test-store/) for the testing-specific wrapper.
+
+---
+
+## Disposal
+
+`store.dispose()` performs deterministic cleanup:
+
+1. Cancels all running executors (triggers abort signals)
+2. Unsubscribes all listeners
+3. Disposes nested child stores recursively
+4. Marks the instance as disposed
+
+After disposal:
+- `store.send()` **throws** an error
+- `emit()` inside a still-running executor is **silently ignored**
+
+### When disposal matters
+
+Disposal is optional in many cases. If the store goes out of scope and nothing references it, JavaScript's garbage collector handles cleanup.
+
+Dispose explicitly when:
+- **Long-running executors** are in-flight (e.g., a polling loop, a large file upload). Disposing triggers their abort signals immediately, stopping wasted work and network requests.
+- **You need deterministic cleanup timing.** GC is nondeterministic. If your executor holds a WebSocket connection or a timer, explicit disposal closes it right away.
+- **Memory-sensitive environments.** Disposing releases all internal references (subscriptions, nested stores, middleware state) immediately rather than waiting for GC.
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+
+function PurchaseWidget({ data }: { data: Purchase }) {
+  const [store] = useState(() => PurchaseStore.create({
+    initialState: { purchase: data },
+  }))
+
+  useEffect(() => {
+    return () => store.dispose()
+  }, [store])
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+```
+
+### Why StoreProvider does not auto-dispose
+
+React Strict Mode mounts and unmounts components twice in development. If `StoreProvider` auto-disposed on unmount, the first unmount would destroy the store. The second mount would then use a disposed store — broken state, swallowed events, confusing errors.
+
+By leaving disposal to you, Hurum avoids this entire class of bugs. You choose when cleanup happens.
+
+---
+
+## Singleton vs. scoped — quick reference
+
+| | Singleton | Scoped (`Store.create`) |
+|---|---|---|
+| Created | Lazily on first access | Explicitly via `Store.create()` |
+| Lifetime | App lifetime | You control it |
+| State | Shared globally | Independent per instance |
+| Initial state | Store defaults only | Custom via `initialState` |
+| Dependencies | Store defaults only | Custom via `deps` |
+| SSR | Not safe | Required |
+| Multiple instances | No | Yes |
+| StoreProvider needed | No | Yes |
+
+## Next steps
+
+- [Provider & withProvider](/react/provider/) — How to use scoped instances in your component tree
+- [Testing Overview](/testing/overview/) — Test utilities that use `Store.create()` internally

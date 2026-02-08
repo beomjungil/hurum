@@ -1,0 +1,96 @@
+---
+title: "Testing Overview"
+description: "Five testing utilities for every layer of your Hurum stores."
+---
+
+Hurum ships five test utilities, each targeting a specific layer of the architecture. They live in `@hurum/core/testing` and work with any test runner -- Vitest, Jest, or anything else.
+
+```ts
+import { TestStore, TestExecutor, TestReducer, TestComputed, TestIntent } from '@hurum/core/testing'
+```
+
+## The five utilities
+
+| Utility | What it tests | Level |
+|---------|---------------|-------|
+| [TestStore](/testing/test-store/) | Full flow: Intent to Event to State | Integration |
+| [TestExecutor](/testing/test-executor/) | Executor side effects and emitted events | Unit |
+| [TestReducer](/testing/test-reducer/) | `.on()` handler pure functions | Unit |
+| [TestComputed](/testing/test-computed/) | Computed derived state calculations | Unit |
+| [TestIntent](/testing/test-intent/) | Intent command composition and execution mode | Unit |
+
+## Recommended testing order
+
+Start at the bottom of the pipeline and work your way up:
+
+### 1. TestReducer and TestComputed (pure functions)
+
+These test the simplest parts of your store -- pure functions with no dependencies. They run synchronously and never touch side effects.
+
+```ts
+const reducer = TestReducer(PurchaseStore)
+const next = reducer.apply(initialState, PurchaseEvent.saved({ purchase }))
+expect(next.saving).toBe(false)
+```
+
+```ts
+const computed = TestComputed(PurchaseStore, 'totalAmount')
+expect(computed.evaluate({ items: [{ amount: 100 }, { amount: 200 }] })).toBe(300)
+```
+
+### 2. TestExecutor (side effects in isolation)
+
+Test each executor independently with mock deps. Verify it emits the right events in the right order.
+
+```ts
+const executor = TestExecutor(SaveExecutor, {
+  deps: { repo: mockRepo },
+})
+await executor.run({ id: '123' })
+executor.assertEmitted([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+### 3. TestStore (full integration)
+
+Test the entire flow: send an intent, verify events were emitted, and check the final state.
+
+```ts
+const store = TestStore(PurchaseStore, {
+  deps: { repo: mockRepo },
+})
+await store.send.submitClicked({ id: '123' })
+store.assertState({ saving: false, purchase: savedPurchase })
+store.assertNoRunningExecutors()
+```
+
+## What to test where
+
+| Question | Utility |
+|----------|---------|
+| "Does my reducer produce the right state for this event?" | TestReducer |
+| "Does my computed value calculate correctly?" | TestComputed |
+| "Does my executor emit the right events?" | TestExecutor |
+| "Does my executor handle errors correctly?" | TestExecutor |
+| "Does my intent wire up the right commands?" | TestIntent |
+| "Does the full flow produce the correct final state?" | TestStore |
+| "Are events emitted in the right order with correct intermediate states?" | TestStore |
+
+## No framework dependency
+
+All five utilities are part of `@hurum/core/testing` -- they have no React dependency. You are testing the state management logic, not the UI.
+
+For testing React components that use Hurum stores, use your regular React testing tools (React Testing Library, etc.) with a Provider and `Store.create()`.
+
+> [!TIP]
+> TestStore's `send()` is async -- it flushes microtasks before resolving, so your async executors complete before you assert. The unit-level utilities (TestReducer, TestComputed, TestIntent) are all synchronous.
+
+## Next steps
+
+- [TestStore](/testing/test-store/) -- Integration test full store flows
+- [TestExecutor](/testing/test-executor/) -- Unit test executors
+- [TestReducer](/testing/test-reducer/) -- Unit test on() handlers
+- [TestComputed](/testing/test-computed/) -- Unit test computed values
+- [TestIntent](/testing/test-intent/) -- Inspect intent configuration

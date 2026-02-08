@@ -1,0 +1,313 @@
+---
+title: "Provider & withProvider"
+description: "Why scoped store instances exist, and how StoreProvider solves the singleton limit."
+---
+
+## The problem with singletons
+
+The [singleton fallback](/react/static-api/) reads from a single global instance. This works for truly global state — auth tokens, theme preferences, feature flags. But many stores are not global.
+
+Consider these three situations where a singleton breaks down:
+
+### 1. The same component appears multiple times
+
+A dashboard renders three chart widgets. Each chart has its own loading state, data, and zoom level. If `ChartStore` is a singleton, all three charts share the same state — loading one chart shows a spinner on all three. Zooming into one chart zooms all of them.
+
+```tsx
+// This does NOT work with a singleton
+function Dashboard() {
+  return (
+    <div>
+      <ChartWidget data={salesData} />   {/* shares state with below */}
+      <ChartWidget data={trafficData} /> {/* shares state with above */}
+    </div>
+  )
+}
+```
+
+You need independent store instances — one per chart.
+
+### 2. Nested stores in lists
+
+You defined a `PurchaseStore` with `Nested.array(ItemStore)`. The parent manages child store instances via `scope.items`. Now you open two purchases side by side — an existing order and a new draft.
+
+If PurchaseStore is a singleton, both purchase forms share the same items array, the same saving state, the same error state. Editing one purchase modifies the other.
+
+```tsx
+// Both forms read from the same singleton
+function App() {
+  return (
+    <>
+      <PurchaseForm purchaseId="order-123" />
+      <PurchaseForm purchaseId="new-draft" />
+    </>
+  )
+}
+```
+
+Each purchase needs its own store instance, with its own nested item stores.
+
+### 3. Page-level state with server data
+
+A product detail page receives server data and initializes a store with that product. When the user navigates to a different product, the store needs fresh state — not leftover data from the previous product.
+
+A singleton persists across navigations. There is no way to "reset" it cleanly because executors may still be running from the previous page.
+
+---
+
+## StoreProvider
+
+`StoreProvider` solves all three problems. It creates a **scoped store instance** — an independent copy of the store that only its child components can see.
+
+The natural pattern is to let each component create its own store. The component owns the store, wraps its children with a `StoreProvider`, and the outside world doesn't need to know about it:
+
+```tsx
+import { useState } from 'react'
+import { StoreProvider, useStore } from '@hurum/react'
+import { ChartStore } from './store'
+
+function ChartWidget({ data, title }: { data: ChartData; title: string }) {
+  const [store] = useState(() => ChartStore.create({
+    initialState: { data, title },
+  }))
+
+  return (
+    <StoreProvider of={ChartStore} store={store}>
+      <ChartContent />
+    </StoreProvider>
+  )
+}
+
+function ChartContent() {
+  const store = useStore(ChartStore)
+  const title = store.use.title()
+  const loading = store.use.loading()
+  return <div>{title}: {loading ? 'Loading...' : 'Ready'}</div>
+}
+
+// The parent just uses components. No store plumbing.
+function Dashboard() {
+  return (
+    <div className="grid">
+      <ChartWidget data={salesData} title="Sales" />
+      <ChartWidget data={trafficData} title="Traffic" />
+    </div>
+  )
+}
+```
+
+Each `ChartWidget` creates and owns its store instance. The `Dashboard` doesn't know or care about stores — it just renders components with props. Inside a `StoreProvider`, `useStore(ChartStore)` returns the scoped instance. Outside a `StoreProvider`, it falls back to the global singleton.
+
+### StoreProvider props
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `of` | `StoreDefinition` | The store definition this Provider is for |
+| `store` | `StoreInstance` | *(Optional)* A store instance created with `Store.create()` |
+| `initialState` | `Partial<RawState>` | *(Optional)* Initial state for auto-created instance |
+| `deps` | `Partial<Deps>` | *(Optional)* Dependencies for auto-created instance |
+| `children` | `ReactNode` | The component tree that accesses this instance |
+
+You can use `StoreProvider` in three ways:
+
+```tsx
+// 1. Provide an existing instance
+<StoreProvider of={ChartStore} store={store}>
+
+// 2. Auto-create with defaults
+<StoreProvider of={ChartStore}>
+
+// 3. Auto-create with options
+<StoreProvider of={ChartStore} initialState={{ data }} deps={{ api }}>
+```
+
+### Creating the instance
+
+Use `Store.create()` to produce a scoped instance. Wrap it in `useState` to keep it stable across re-renders:
+
+```tsx
+const [store] = useState(() => PurchaseStore.create({
+  initialState: { purchase: serverData },  // deep merged with defaults
+  deps: { repository: new PurchaseRepository() },  // shallow merged
+}))
+```
+
+Both `initialState` and `deps` are optional. See [Scoped Instances](/react/scoped-instances/) for merge behavior details.
+
+---
+
+## Nested stores with StoreProvider
+
+This is where `StoreProvider` becomes essential. When a store uses `Nested.array` or `Nested.map`, the parent store manages child instances internally. But the parent itself needs to be a scoped instance if you want multiple independent copies.
+
+```tsx
+import { useStore, StoreProvider } from '@hurum/react'
+import { PurchaseStore } from './store'  // has Nested.array(ItemStore)
+
+function PurchaseForm({ serverData }: { serverData: Purchase }) {
+  const [store] = useState(() => PurchaseStore.create({
+    initialState: {
+      id: serverData.id,
+      items: serverData.items,  // Hurum creates child ItemStore instances automatically
+    },
+    deps: { repository: new PurchaseRepository() },
+  }))
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const total = store.use.total()           // computed from child items
+  const itemStores = store.scope.items      // child store instances
+
+  return (
+    <div>
+      <h2>Total: ${total}</h2>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+      <button onClick={() => store.send.addItemClicked({
+        id: crypto.randomUUID(), name: '', price: 0
+      })}>
+        Add Item
+      </button>
+    </div>
+  )
+}
+
+function ItemRow({ store: itemStore }: { store: StoreInstance }) {
+  const store = useStore(itemStore)
+  const name = store.use.name()
+  const price = store.use.price()
+  // Only this row re-renders when its own name or price changes
+
+  return (
+    <div>
+      <input
+        value={name}
+        onChange={(e) => store.send.nameEdited({
+          id: store.getState().id, name: e.target.value
+        })}
+      />
+      <input
+        type="number"
+        value={price}
+        onChange={(e) => store.send.priceEdited({
+          id: store.getState().id, price: Number(e.target.value)
+        })}
+      />
+    </div>
+  )
+}
+```
+
+Now you can render two purchase forms side by side. Each has its own items, its own saving state, its own everything:
+
+```tsx
+function App() {
+  return (
+    <>
+      <PurchaseForm serverData={existingOrder} />
+      <PurchaseForm serverData={newDraft} />
+    </>
+  )
+}
+```
+
+---
+
+## withProvider
+
+Sometimes you want a simpler guarantee: **every mount of this component gets a fresh store.** That is what `withProvider` does. It is a standalone function, not a method on the store.
+
+```tsx
+import { useStore, withProvider } from '@hurum/react'
+import { UploadStore } from './store'
+
+const UploadModal = withProvider(UploadStore, function UploadModal() {
+  const store = useStore(UploadStore)
+  const progress = store.use.uploadProgress()
+
+  return (
+    <dialog>
+      <p>Upload progress: {progress}%</p>
+      <button onClick={() => store.send.uploadStarted({ file })}>
+        Upload
+      </button>
+    </dialog>
+  )
+})
+```
+
+Each time `<UploadModal />` mounts, a new `UploadStore` instance is created with default state. When it unmounts, the instance is no longer used. No explicit `Store.create()`, no `useState`, no Provider boilerplate.
+
+### When to use which
+
+| Scenario | Use |
+|----------|-----|
+| Needs `initialState` from props or server | **StoreProvider** + `Store.create()` |
+| Needs custom `deps` per instance | **StoreProvider** + `Store.create()` |
+| Just needs a fresh isolated instance per mount | **withProvider** |
+| Modals, wizards, one-off dialogs | **withProvider** |
+| List items with nested stores | **StoreProvider** (parent provides, children consume via scope) |
+
+---
+
+## Multiple Providers
+
+You can nest multiple `StoreProvider` components of different stores:
+
+```tsx
+<StoreProvider of={AuthStore} store={authStore}>
+  <StoreProvider of={PurchaseStore} store={purchaseStore}>
+    <PurchaseContent />
+  </StoreProvider>
+</StoreProvider>
+```
+
+Or nest the same store's `StoreProvider` — the inner one takes precedence:
+
+```tsx
+<StoreProvider of={CounterStore} store={outerStore}>
+  <div>
+    <Counter /> {/* reads from outerStore */}
+    <StoreProvider of={CounterStore} store={innerStore}>
+      <Counter /> {/* reads from innerStore */}
+    </StoreProvider>
+  </div>
+</StoreProvider>
+```
+
+### No auto-dispose
+
+The `StoreProvider` does **not** auto-dispose the store when it unmounts. This is intentional — React Strict Mode mounts and unmounts components twice in development. Auto-disposing on the first unmount would destroy the store before the second mount.
+
+If you need guaranteed cleanup (e.g., aborting in-flight API calls on unmount), handle it explicitly:
+
+```tsx
+function ScopedPurchase() {
+  const [store] = useState(() => PurchaseStore.create())
+
+  useEffect(() => {
+    return () => store.dispose()
+  }, [store])
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+```
+
+In most cases, if no references remain after unmount, the garbage collector handles cleanup naturally.
+
+## Next steps
+
+- [Scoped Instances](/react/scoped-instances/) — `Store.create()` details: merge behavior, disposal, SSR
+- [useStore](/react/use-store/) — The hook that resolves Provider context

@@ -1,0 +1,312 @@
+---
+title: Store
+description: "API reference for Store builder and StoreInstance."
+---
+
+```ts
+import { Store } from '@hurum/core'
+```
+
+## `Store({ state })`
+
+Creates a store builder from an initial state object. Returns a chainable builder that is also a `StoreDefinition` -- you can call `.create()` at any point or continue chaining.
+
+### Signature
+
+```ts
+function Store<TState extends Record<string, unknown>>(
+  config: { state: TState },
+): StoreBuilder<Record<string, never>, TState, Record<string, never>>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config.state` | `Record<string, unknown>` | The initial raw state. Each key becomes a state field. |
+
+### Returns
+
+A `StoreBuilder` with chainable methods.
+
+### Example
+
+```ts
+const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+  .on(CounterEvent.incremented, (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }))
+  .computed({
+    doubled: (state) => state.count * 2,
+  })
+  .intents(CounterIntents)
+  .executors(IncrExec, DecrExec)
+
+const store = CounterStore.create()
+```
+
+---
+
+## Builder Methods
+
+### `.on(event, handler)` -- per-event handler
+
+Registers a state reducer for a single event type.
+
+```ts
+.on(
+  event: EventCreator<TType, TPayload>,
+  handler: (state: State, payload: TPayload) => RawState,
+): StoreBuilder
+```
+
+The `state` parameter includes raw state, computed values, and resolved nested state. The return value must be the raw state shape only (no computed fields).
+
+### `.on(namespace, handlers)` -- namespace handler
+
+Registers multiple handlers from an event namespace at once.
+
+```ts
+.on(
+  events: EventNamespace,
+  handlers: { [K in keyof EventNamespace]?: (state: State, payload: Payload) => RawState },
+): StoreBuilder
+```
+
+### Example
+
+```ts
+// Per-event
+.on(CartEvent.itemAdded, (state, { item }) => ({
+  ...state,
+  items: [...state.items, item],
+}))
+
+// Namespace
+.on(CartEvent, {
+  itemAdded: (state, { item }) => ({ ...state, items: [...state.items, item] }),
+  cleared: () => ({ items: [] }),
+})
+```
+
+---
+
+### `.computed(definitions)`
+
+Defines derived state fields that recalculate when their dependencies change.
+
+```ts
+.computed<C extends Record<string, (state: ResolvedState) => unknown>>(
+  def: C,
+): StoreBuilder
+```
+
+See the [Computed API reference](/api/core/computed/) for details on dependency tracking and behavior.
+
+### Example
+
+```ts
+.computed({
+  total: (state) => state.items.reduce((sum, item) => sum + item.price, 0),
+  isEmpty: (state) => state.items.length === 0,
+})
+```
+
+---
+
+### `.intents(container)`
+
+Registers an intents container. This enables `store.send.intentName()` shorthand.
+
+```ts
+.intents(container: IntentsContainer): StoreBuilder
+```
+
+---
+
+### `.executors(...executors)`
+
+Registers one or more executors. Each executor's command is matched at dispatch time.
+
+```ts
+.executors(...execs: Executor[]): StoreBuilder
+```
+
+### Example
+
+```ts
+.intents(CartIntents)
+.executors(AddItemExec, RemoveItemExec, CheckoutExec)
+```
+
+---
+
+### `.deps<T>()`
+
+Declares the dependency types for this store. Dependencies are injected at `Store.create({ deps })`.
+
+```ts
+.deps<D extends Record<string, unknown>>(): StoreBuilder
+```
+
+### Example
+
+```ts
+.deps<{ repo: CartRepo; analytics: Analytics }>()
+```
+
+---
+
+### `.childDeps(key, mapper)`
+
+Maps parent dependencies to a nested child store's dependencies.
+
+```ts
+.childDeps<K extends keyof State & string>(
+  key: K,
+  mapper: (deps: TDeps) => ChildDeps,
+): StoreBuilder
+```
+
+### Example
+
+```ts
+.childDeps('transaction', (deps) => ({
+  transactionRepo: deps.repo.transactions,
+}))
+```
+
+---
+
+### `.relay(event, handler)`
+
+Registers a relay handler that transforms one event into zero or more other events. Used for cross-store event coordination.
+
+```ts
+.relay(
+  event: EventCreator<TType, TPayload>,
+  handler: (event: EventInstance, state: State) => EventInstance[],
+): StoreBuilder
+```
+
+### Example
+
+```ts
+.relay(ChildEvent.completed, (event, state) => {
+  if (state.items.length === 0) {
+    return [ParentEvent.allCompleted()]
+  }
+  return []
+})
+```
+
+---
+
+### `.middleware(...middlewares)`
+
+Registers one or more middleware instances or factories.
+
+```ts
+.middleware(...mws: (Middleware | MiddlewareFactory)[]): StoreBuilder
+```
+
+---
+
+### `.create(options?)`
+
+Instantiates the store. Returns a live `StoreInstance`.
+
+```ts
+.create(options?: StoreCreateOptions): StoreInstance
+```
+
+---
+
+## `StoreCreateOptions`
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `initialState` | `Partial<ResolvedState>` | Override initial state values. Deep merged with the default state. |
+| `deps` | `Partial<TDeps>` | Inject dependencies. Shallow merged. |
+
+### Example
+
+```ts
+const store = MyStore.create({
+  initialState: { count: 10 },
+  deps: { repo: new CartRepo(apiClient) },
+})
+```
+
+---
+
+## `StoreInstance`
+
+A live store instance returned by `.create()`. This is the primary runtime API.
+
+### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `send` | `(prepared: PreparedIntent) => IntentRef` | Dispatch a prepared intent. Returns an `IntentRef` for cancellation. |
+| `send` | `(intent: IntentDescriptor, payload) => IntentRef` | Dispatch with explicit intent descriptor and payload. |
+| `send.intentName` | `(payload) => IntentRef` | Named shorthand. Available when intents are registered via `.intents()`. |
+| `cancel` | `(ref: IntentRef) => void` | Cancel a specific running intent by its ref. |
+| `cancelAll` | `() => void` | Cancel all running intents. |
+| `getState` | `() => State` | Get the current combined state (raw + computed + nested). |
+| `subscribe` | `(cb: (state) => void) => () => void` | Subscribe to state changes. Returns an unsubscribe function. |
+| `subscribe` | `('events', cb: (event) => void) => () => void` | Subscribe to raw event emissions. |
+| `selector` | `(fn: (state) => T) => Selector<T>` | Create a memoized derived state selector. |
+| `dispose` | `() => void` | Cleanup: cancels all intents, disposes nested children, clears listeners. |
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `scope` | `ScopeOf<TRawState>` | Access nested child store instances. Keys match the nested field names. |
+
+### Send API
+
+There are three ways to dispatch an intent:
+
+```ts
+// 1. PreparedIntent (recommended)
+store.send(CartIntents.addItem({ item }))
+
+// 2. Named shorthand
+store.send.addItem({ item })
+
+// 3. Descriptor + payload (legacy)
+store.send(CartIntents.addItem, { item })
+```
+
+All three return an `IntentRef`.
+
+---
+
+## Lifecycle
+
+### Disposal
+
+After `store.dispose()`:
+- All running intents are cancelled.
+- All nested child stores are disposed.
+- All listeners are cleared.
+- Calling `store.send()` throws an error.
+- Calling `emit()` from an already-running executor is silently ignored.
+
+### State Subscriptions
+
+`subscribe(cb)` fires synchronously whenever state changes. The callback receives the full combined state (raw + computed + nested). Returns an unsubscribe function.
+
+`subscribe('events', cb)` fires for every event applied to the store, including events bubbled from nested children.
+
+---
+
+## Notes
+
+- The store builder is immutable. Each method returns a new builder instance.
+- The builder itself is a `StoreDefinition` -- you can pass it directly to testing APIs like `TestStore()`.
+- `initialState` uses deep merge. Nested objects are merged recursively. `deps` uses shallow merge.
+- Sending an intent after disposal throws. This is intentional -- it surfaces lifecycle bugs early.

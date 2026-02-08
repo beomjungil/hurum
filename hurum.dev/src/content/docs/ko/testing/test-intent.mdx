@@ -1,0 +1,123 @@
+---
+title: "TestIntent"
+description: "Intent Command 구성과 실행 모드를 검증해요."
+---
+
+`TestIntent`는 Intent 디스크립터의 구성을 검사해요: 어떤 step(Command 또는 EventCreator)을 참조하고 어떤 실행 모드를 사용하는지. "이 Intent가 디스패치되면 Store가 무엇을 실행하는가?"라는 질문에 답해요.
+
+## 설정
+
+```ts
+import { TestIntent } from '@hurum/core/testing'
+import { PurchaseIntents } from './intents'
+
+const intent = TestIntent(PurchaseIntents.submitClicked)
+```
+
+`TestIntent`는 `Intents()` 정의에서 가져온 Intent 디스크립터를 받아 `steps`와 `mode`가 있는 읽기 전용 객체를 반환해요.
+
+## steps
+
+Intent가 실행할 step(Command 또는 EventCreator) 목록이에요:
+
+```ts
+const intent = TestIntent(PurchaseIntents.submitClicked)
+
+expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+```
+
+Intent가 올바른 step에 연결되었는지 검증해요. Intent를 리팩터링해서 step을 추가하거나 제거하면, 이 테스트가 변경을 잡아내요.
+
+Intent step은 `Command` 또는 `EventCreator`일 수 있어요:
+
+```ts
+// Command steps
+expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+
+// EventCreator steps (직접 Event emit, Executor 불필요)
+const toggleIntent = TestIntent(CounterIntents.toggle)
+expect(toggleIntent.steps).toEqual([CounterEvent.toggled])
+```
+
+## mode
+
+실행 모드 -- step이 어떻게 실행되는지:
+
+```ts
+// Sequential (default): steps run one after another
+const sequential = TestIntent(PurchaseIntents.submitClicked)
+expect(sequential.mode).toBe('sequential')
+
+// All (fail-fast parallel): steps run concurrently, abort all on first failure
+const failFast = TestIntent(PurchaseIntents.loadAll)
+expect(failFast.mode).toBe('all')
+
+// AllSettled (independent parallel): steps run concurrently, all complete independently
+const independent = TestIntent(PurchaseIntents.initialize)
+expect(independent.mode).toBe('allSettled')
+```
+
+| 모드 | 생성 방법 | 동작 |
+|------|-------------|----------|
+| `sequential` | `Intent(step1, step2)` | step을 순서대로 실행 |
+| `all` | `Intent.all(step1, step2)` | 동시 실행, 첫 에러 시 전체 중단 |
+| `allSettled` | `Intent.allSettled(step1, step2)` | 동시 실행, 모두 독립적으로 완료 |
+
+## 전체 예시
+
+```ts title="intents.test.ts"
+import { describe, it, expect } from 'vitest'
+import { TestIntent } from '@hurum/core/testing'
+import { PurchaseIntents } from './intents'
+import {
+  ValidateCommand,
+  SavePurchaseCommand,
+  LoadPricesCommand,
+  LoadInventoryCommand,
+} from './executors'
+
+describe('PurchaseIntents', () => {
+  it('submitClicked runs validation then save', () => {
+    const intent = TestIntent(PurchaseIntents.submitClicked)
+
+    expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+    expect(intent.mode).toBe('sequential')
+  })
+
+  it('initialize loads prices and inventory concurrently', () => {
+    const intent = TestIntent(PurchaseIntents.initialize)
+
+    expect(intent.steps).toEqual([LoadPricesCommand, LoadInventoryCommand])
+    expect(intent.mode).toBe('allSettled')
+  })
+
+  it('plusClicked runs a single command', () => {
+    const intent = TestIntent(CounterIntents.plusClicked)
+
+    expect(intent.steps).toHaveLength(1)
+    expect(intent.steps).toEqual([IncrementCommand])
+    expect(intent.mode).toBe('sequential')
+  })
+})
+```
+
+## TestIntent 사용 시점
+
+TestIntent는 가벼운 건전성 검사예요. 다음과 같은 경우에 사용해요:
+
+- **Intent가 여러 step을 연결할 때.** step이 올바르고 순서가 맞는지 확인해요.
+- **Intent가 병렬 실행을 사용할 때.** 모드가 실수로 `sequential`이 아닌 `all` 또는 `allSettled`인지 확인해요.
+- **Intent 구조를 리팩터링할 때.** TestIntent 테스트는 step이 추가, 제거, 또는 순서 변경되면 즉시 실패해요.
+
+단일 step에 `sequential` 모드인 Intent의 경우, 테스트는 간단하지만 Intent의 의도를 문서화하는 데 여전히 가치가 있어요:
+
+```ts
+expect(intent.steps).toEqual([IncrementCommand])
+expect(intent.mode).toBe('sequential')
+```
+
+## 다음 단계
+
+- [TestExecutor](/ko/testing/test-executor/) -- Command가 참조하는 Executor 테스트
+- [TestStore](/ko/testing/test-store/) -- 전체 흐름 통합 테스트
+- [테스트 개요](/ko/testing/overview/) -- 다섯 가지 유틸리티 한눈에 보기

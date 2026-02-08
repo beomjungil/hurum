@@ -1,0 +1,216 @@
+---
+title: Middleware
+description: "API reference for Middleware interface and built-in middleware."
+---
+
+```ts
+import { logger, persist, devtools, undoRedo } from '@hurum/core'
+```
+
+Middleware observes store lifecycle events. Middleware is read-only -- it must not modify state or emit events.
+
+## `Middleware` Interface
+
+```ts
+type Middleware = {
+  name: string
+  onEvent?: (event: EventInstance, state: Record<string, unknown>) => void
+  onStateChange?: (prev: Record<string, unknown>, next: Record<string, unknown>) => void
+  onIntentStart?: (intent: IntentDescriptor, payload: unknown) => void
+  onIntentEnd?: (intent: IntentDescriptor, payload: unknown) => void
+  onError?: (error: Error, context: { intent: IntentDescriptor; payload?: unknown; command?: Command }) => void
+}
+```
+
+### Hooks
+
+| Hook | When it fires |
+|------|---------------|
+| `onEvent` | After an event is applied to the store. Receives the event and the new state. |
+| `onStateChange` | After state changes. Receives previous and next state. |
+| `onIntentStart` | When an intent begins execution. |
+| `onIntentEnd` | When an intent finishes (success or failure). |
+| `onError` | When an executor throws an error. Receives the error and context (intent, payload, command). |
+
+### Custom Middleware Example
+
+```ts
+const analytics: Middleware = {
+  name: 'analytics',
+  onIntentStart: (intent, payload) => {
+    trackEvent('intent_started', { mode: intent.mode })
+  },
+  onError: (error) => {
+    reportError(error)
+  },
+}
+
+const MyStore = Store({ state: { ... } })
+  .middleware(analytics)
+```
+
+---
+
+## `MiddlewareFactory`
+
+An alternative to providing a `Middleware` object directly. The factory pattern is useful when middleware needs configuration options.
+
+```ts
+interface MiddlewareFactory {
+  create(): Middleware
+  readonly name: string
+}
+```
+
+Both `Middleware` and `MiddlewareFactory` are accepted by `.middleware()`.
+
+---
+
+## Built-in Middleware
+
+### `logger(options?)`
+
+Console logging middleware. Logs events, state changes, intent lifecycle, and errors.
+
+```ts
+function logger(options?: LoggerOptions): Middleware
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `filter` | `(event: EventInstance) => boolean` | Only log events that pass the filter. |
+
+```ts
+import { logger } from '@hurum/core'
+
+const MyStore = Store({ state: { count: 0 } })
+  .middleware(logger({ filter: (e) => !e.type.startsWith('Timer/') }))
+```
+
+---
+
+### `persist(options)`
+
+Persistence middleware. Saves state to storage on every state change. Returns a handle with the middleware and a hydration function.
+
+```ts
+function persist(options: PersistOptions): PersistHandle
+```
+
+**`PersistOptions`**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `key` | `string` | -- | Storage key. Required. |
+| `storage` | `Pick<Storage, 'getItem' \| 'setItem'>` | `localStorage` | Storage backend. |
+| `serialize` | `(state) => string` | `JSON.stringify` | Custom serializer. |
+| `deserialize` | `(raw: string) => Record<string, unknown>` | `JSON.parse` | Custom deserializer. |
+| `pick` | `string[]` | -- | Only persist these state keys. |
+
+**`PersistHandle`**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `middleware` | `Middleware` | The middleware instance to register. |
+| `getPersistedState` | `() => Record<string, unknown> \| null` | Read the last persisted state from storage. |
+
+```ts
+import { persist } from '@hurum/core'
+
+const storage = persist({ key: 'my-store', pick: ['todos', 'settings'] })
+
+const MyStore = Store({ state: { todos: [], settings: {} } })
+  .middleware(storage.middleware)
+
+// Hydrate from storage on startup
+const store = MyStore.create({
+  initialState: storage.getPersistedState() ?? undefined,
+})
+```
+
+---
+
+### `devtools(options?)`
+
+Redux DevTools Extension integration. Sends events and state to the browser extension for inspection.
+
+```ts
+function devtools(options?: DevToolsOptions): DevToolsHandle
+```
+
+**`DevToolsOptions`**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `name` | `string` | `'Hurum Store'` | Display name in the DevTools panel. |
+
+**`DevToolsHandle`**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `middleware` | `Middleware` | The middleware instance to register. |
+| `connect` | `(store: { getState: () => Record<string, unknown> }) => void` | Call after `Store.create()` to initialize the DevTools connection. |
+
+```ts
+import { devtools } from '@hurum/core'
+
+const dt = devtools({ name: 'Cart' })
+
+const CartStore = Store({ state: { items: [] } })
+  .middleware(dt.middleware)
+
+const store = CartStore.create()
+dt.connect(store)
+```
+
+---
+
+### `undoRedo(options?)`
+
+Undo/redo middleware. Tracks state history for in-app time-travel.
+
+```ts
+function undoRedo(options?: UndoRedoOptions): UndoRedoHandle
+```
+
+**`UndoRedoOptions`**
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `maxHistory` | `number` | `50` | Maximum number of state snapshots to retain. |
+
+**`UndoRedoHandle`**
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `middleware` | `Middleware` | The middleware instance to register. |
+| `undo` | `() => Record<string, unknown> \| null` | Restore the previous state. Returns `null` if at the beginning. |
+| `redo` | `() => Record<string, unknown> \| null` | Restore the next state. Returns `null` if at the end. |
+| `canUndo` | `() => boolean` | Whether an undo operation is possible. |
+| `canRedo` | `() => boolean` | Whether a redo operation is possible. |
+| `getHistory` | `() => readonly Record<string, unknown>[]` | The full state history. |
+| `getPosition` | `() => number` | The current position in the history. |
+
+```ts
+import { undoRedo } from '@hurum/core'
+
+const history = undoRedo({ maxHistory: 30 })
+
+const EditorStore = Store({ state: { content: '' } })
+  .middleware(history.middleware)
+
+const store = EditorStore.create()
+
+// Later, in response to user actions:
+const prevState = history.undo()
+const nextState = history.redo()
+```
+
+---
+
+## Notes
+
+- Middleware hooks fire synchronously in registration order.
+- Middleware is purely observational. Mutating state or emitting events from middleware is unsupported and will cause undefined behavior.
+- Multiple middleware instances can be registered via `.middleware(a, b, c)` or chained `.middleware(a).middleware(b)`.
+- Built-in middleware that returns a handle (persist, devtools, undoRedo) separates the middleware instance from its control API. Register the `.middleware` property; use the handle for interaction.

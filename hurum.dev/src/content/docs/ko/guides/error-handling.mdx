@@ -1,0 +1,240 @@
+---
+title: "에러 처리"
+description: "Event로 유효성 검증, 에러 포착, 실패 상태를 관리해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 가이드는 [CommandExecutor](/ko/concepts/command-executor/)와 [Intent](/ko/concepts/intent/)를 기반으로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Hurum에서 에러는 다른 모든 것과 동일한 경로를 따라요: Executor가 에러를 포착하고 Event를 emit해요. 프레임워크 레벨에서 특별한 에러 채널이나 try/catch 래퍼는 없어요. 이렇게 하면 에러가 상태에 어떻게 나타나는지 완전히 제어할 수 있어요.
+
+두 가지 패턴이 대부분의 시나리오를 커버해요: **순차적 Intent를 통한 유효성 검증**과 **Executor의 에러 Event**.
+
+## 패턴 1: 순차적 Intent를 통한 유효성 검증
+
+사용자가 폼을 제출할 때, 보통 먼저 유효성을 검증한 다음 저장하고 싶어요. 유효성 검증이 실패하면 저장은 절대 실행되어서는 안 돼요.
+
+순차적 Intent가 이걸 자연스럽게 처리해요. Executor가 throw하면, Intent 내의 나머지 Command는 건너뛰어요.
+
+### Event 정의
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+interface ValidationError {
+  field: string
+  message: string
+}
+
+const PurchaseEvent = Events('Purchase', {
+  validated: Event<{ purchase: Purchase }>(),
+  validationFailed: Event<{ errors: ValidationError[] }>(),
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+### 유효성 검증 Executor
+
+유효성 검증 Executor는 `validated` 또는 `validationFailed`를 emit해요. 실패 시 Intent 체인을 중지하기 위해 throw해요:
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+const [ValidateCommand, ValidateExecutor] = CommandExecutor<
+  { purchase: Purchase }
+>((command, { emit }) => {
+  const errors = validate(command.purchase)
+
+  if (errors.length > 0) {
+    emit(PurchaseEvent.validationFailed({ errors }))
+    throw new Error('Validation failed')  // Stops the intent chain
+  }
+
+  emit(PurchaseEvent.validated({ purchase: command.purchase }))
+})
+```
+
+`throw`가 핵심이에요. Hurum에게 이 Intent의 나머지 Command 실행을 중지하라고 알려줘요. `SaveCommand`는 절대 실행되지 않아요.
+
+### 저장 Executor
+
+저장 Executor는 유효성 검증이 통과한 경우에만 실행돼요:
+
+```ts
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+### 연결하기
+
+Intent는 Command를 순서대로 나열해요. 먼저 유효성 검증, 그다음 저장:
+
+```ts
+import { Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(ValidateCommand, SavePurchaseCommand),
+})
+```
+
+사용자가 제출을 클릭하면:
+1. `ValidateCommand`가 먼저 실행돼요
+2. 유효성 검증 실패 시: `validationFailed`가 emit되고, throw로 체인이 중지되며, `SavePurchaseCommand`는 절대 실행되지 않아요
+3. 유효성 검증 통과 시: `validated`가 emit되고, `SavePurchaseCommand`가 정상적으로 실행돼요
+
+### Store
+
+모든 Event를 한 곳에서 처리해요:
+
+```ts
+import { Store } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    validationErrors: [] as ValidationError[],
+    saveError: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    validated: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      validationErrors: [],
+    }),
+    validationFailed: (state, { errors }) => ({
+      ...state,
+      validationErrors: errors,
+    }),
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      saveError: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      saveError: error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(ValidateExecutor, SavePurchaseExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+## 패턴 2: Executor의 에러 Event
+
+단일 Executor 내에서 발생하는 에러(예: 네트워크 장애)의 경우, 에러를 포착하고 Event를 emit해요. 예외가 처리되지 않은 채 전파되지 않도록 하세요.
+
+```ts
+const [LoadCommand, LoadExecutor] = CommandExecutor<
+  { id: string },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.loadRequested({ id: command.id }))
+  if (signal.aborted) return
+
+  try {
+    const purchase = await deps.purchaseRepository.findById(command.id)
+    if (signal.aborted) return
+    emit(PurchaseEvent.loaded({ purchase }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(PurchaseEvent.loadFailed({
+      error: { code: 'LOAD_ERROR', message: (error as Error).message },
+    }))
+  }
+})
+```
+
+try/catch는 Executor 내부에 있어요. Store는 예외를 절대 보지 않아요 -- 깔끔하게 타입이 지정된 에러 페이로드를 가진 `loadFailed` Event만 봐요.
+
+## Middleware onError
+
+Executor가 에러를 포착하지 않고 throw하면, Hurum의 middleware `onError` 훅이 이걸 잡아내요. 이것은 처리되지 않은 에러를 위한 안전망이에요:
+
+```ts
+const errorLoggingMiddleware: Middleware = {
+  onError(error, context) {
+    console.error('Unhandled executor error:', error.message)
+    console.error('Intent:', context.intent)
+    console.error('Command:', context.command)
+    // Report to error tracking service
+    errorTracker.report(error, { intent: context.intent })
+  },
+}
+
+const MyStore = Store({ state: { ... } })
+  .middleware(errorLoggingMiddleware)
+  // ...
+```
+
+`onError`는 로깅과 모니터링에 사용하세요. 상태 전환에는 사용하지 마세요. 상태는 항상 Event를 통해 변경되어야 해요.
+
+## React에서 에러 표시하기
+
+에러 Event는 일반 Event와 같아요. `on` 핸들러에서 처리한 다음, 컴포넌트에서 상태를 읽으면 돼요:
+
+```tsx
+function PurchaseForm() {
+  const store = useStore(PurchaseStore)
+  const validationErrors = store.use.validationErrors()
+  const saveError = store.use.saveError()
+  const saving = store.use.saving()
+
+  return (
+    <form onSubmit={(e) => {
+      e.preventDefault()
+      store.send.submitButtonClicked({ purchase })
+    }}>
+      {validationErrors.length > 0 && (
+        <ul className="errors">
+          {validationErrors.map((err) => (
+            <li key={err.field}>{err.field}: {err.message}</li>
+          ))}
+        </ul>
+      )}
+
+      {saveError && (
+        <div className="error">Save failed: {saveError.message}</div>
+      )}
+
+      <button type="submit" disabled={saving}>
+        {saving ? 'Saving...' : 'Submit'}
+      </button>
+    </form>
+  )
+}
+```
+
+## 핵심 포인트
+
+- **순차적 Intent는 throw 시 중지돼요.** 이것이 유효성 검증 패턴이에요. `SaveCommand` 앞에 `ValidateCommand`를 나열하고, 유효성 검증기에서 throw해서 저장을 차단해요.
+- **에러 Event는 일반 Event예요.** 특별한 에러 타입은 없어요. `Events()` 그룹에 정의하고 다른 Event와 마찬가지로 `on`에서 처리해요.
+- **Executor 내부에서 에러를 포착하세요.** 예외가 밖으로 새어나가지 않도록 하세요. 타입이 지정된 에러 Event로 변환해서 Store가 예측 가능하게 처리할 수 있도록 해요.
+- **Middleware `onError`는 안전망이에요.** 상태 관리가 아닌 로깅에 사용하세요. `onError`에서 에러를 처리하고 있다면, 해당 로직을 Executor의 에러 Event로 옮기세요.
+- **적절한 시점에 에러 상태를 초기화하세요.** 사용자가 액션을 재시도할 때, "requested" 핸들러에서 이전 에러를 초기화해서 오래된 에러가 남아있지 않도록 해요.

@@ -1,0 +1,71 @@
+---
+title: "설치"
+description: "@hurum/core와 @hurum/react를 설치해서 Hurum을 시작하세요."
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## 코어 패키지 설치
+
+`@hurum/core`는 프레임워크에 무관한 기반이에요. **런타임 의존성이 제로**예요.
+
+<Tabs>
+  <TabItem label="npm">
+    ```sh
+    npm install @hurum/core
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add @hurum/core
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add @hurum/core
+    ```
+  </TabItem>
+</Tabs>
+
+## React 바인딩 추가 (선택)
+
+React를 사용 중이라면, 훅, Provider, `Store.use.*` API를 위해 `@hurum/react`를 설치하세요.
+
+<Tabs>
+  <TabItem label="npm">
+    ```sh
+    npm install @hurum/react
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add @hurum/react
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add @hurum/react
+    ```
+  </TabItem>
+</Tabs>
+
+`@hurum/react`는 `react`만 peer dependency로 가져요 -- 다른 의존성은 추가되지 않아요.
+
+## 요구 사항
+
+| 요구 사항 | 버전 |
+|---|---|
+| TypeScript | 5.0+ |
+| React (`@hurum/react` 사용 시) | 18+ |
+
+Hurum은 완전한 타입 추론을 위해 `const` 타입 파라미터 및 템플릿 리터럴 타입 같은 TypeScript 기능에 의존해요. TypeScript 5.0 이상이 필요해요.
+
+`@hurum/core`는 어떤 JavaScript 런타임에서든 동작해요 -- Node.js, Deno, Bun, 브라우저, React Native. 프레임워크 의존성이 전혀 없어요.
+
+## 빌드 포맷
+
+두 패키지 모두 **CJS + ESM 듀얼 빌드**로 제공되므로, 별도의 설정 없이 어떤 번들러나 런타임에서든 동작해요.
+
+## 다음 단계
+
+준비가 완료되었어요. [빠른 시작](/ko/getting-started/quick-start/)으로 이동해서 첫 번째 Hurum Store를 만들어보세요.

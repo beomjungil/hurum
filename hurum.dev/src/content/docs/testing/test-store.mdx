@@ -1,0 +1,202 @@
+---
+title: "TestStore"
+description: "Integration test the full store flow from intent to final state."
+---
+
+`TestStore` wraps `Store.create()` with assertions and an async `send()` that flushes microtasks. It is the main utility for integration testing -- send an intent, verify events were emitted and state is correct.
+
+## Setup
+
+```ts
+import { TestStore } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseIntents } from './intents'
+import { PurchaseEvent } from './events'
+
+const mockRepo = {
+  save: vi.fn().mockResolvedValue(savedPurchase),
+}
+
+const store = TestStore(PurchaseStore, {
+  initialState: { purchase: mockPurchase },
+  deps: { repository: mockRepo },
+})
+```
+
+`TestStore` accepts the same options as `Store.create()`:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `initialState` | `Partial<RawState>` | Deep merged with store defaults |
+| `deps` | `Partial<Deps>` | Shallow merged with store defaults |
+
+## send (async)
+
+`send()` dispatches an intent and waits for all async executors to complete before resolving. This is the key difference from the regular `store.send()` -- you can `await` it and then assert.
+
+```ts
+// Named shorthand
+await store.send.submitClicked({ purchase: mockPurchase })
+
+// PreparedIntent
+await store.send(PurchaseIntents.submitClicked({ purchase: mockPurchase }))
+
+// Descriptor + payload
+await store.send(PurchaseIntents.submitClicked, { purchase: mockPurchase })
+```
+
+All three forms are equivalent. The named shorthand is the most concise.
+
+## Assertions
+
+### assertState
+
+Check that specific state fields match expected values. Uses structural equality -- you only need to provide the fields you want to check.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertState({
+  saving: false,
+  purchase: savedPurchase,
+})
+// Only checks `saving` and `purchase`. Other fields are ignored.
+```
+
+If a field doesn't match, the error message shows both expected and received values:
+
+```
+State mismatch for key "saving":
+  Expected: false
+  Received: true
+```
+
+### assertEvents
+
+Verify the exact list of events that were emitted, in order.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertEvents([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+This checks both the event types and their payloads. Order matters -- the events must appear in exactly the order shown.
+
+### assertEventSequence
+
+Check events paired with the state snapshot after each event. This is the most powerful assertion -- it verifies that intermediate states were correct throughout the flow.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertEventSequence([
+  {
+    event: PurchaseEvent.saveRequested({ id: '123' }),
+    state: { saving: true, error: null },
+  },
+  {
+    event: PurchaseEvent.saved({ purchase: savedPurchase }),
+    state: { saving: false, purchase: savedPurchase },
+  },
+])
+```
+
+Each entry is matched independently -- you can check any subset of the event sequence. The `state` field is a partial match, just like `assertState`.
+
+### assertNoRunningExecutors
+
+Verify all executors have completed. Useful at the end of a test to ensure no async work is still pending.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+store.assertNoRunningExecutors()
+```
+
+If executors are still running:
+
+```
+Expected no running executors, but 2 are still running
+```
+
+## Other methods
+
+### getState
+
+Read the full current state (raw + computed):
+
+```ts
+const state = store.getState()
+expect(state.purchase?.name).toBe('Test')
+expect(state.totalAmount).toBe(300)  // computed
+```
+
+### scope
+
+Access nested child store instances:
+
+```ts
+const childStore = store.scope.items
+// Interact with nested stores for complex scenarios
+```
+
+## Full example
+
+```ts title="purchase-store.test.ts"
+import { describe, it, expect, vi } from 'vitest'
+import { TestStore } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseIntents } from './intents'
+import { PurchaseEvent } from './events'
+
+describe('PurchaseStore', () => {
+  const mockPurchase = { id: '123', name: 'Widget', items: [{ amount: 100 }] }
+
+  it('saves a purchase', async () => {
+    const savedPurchase = { ...mockPurchase, savedAt: '2026-01-01' }
+    const mockRepo = { save: vi.fn().mockResolvedValue(savedPurchase) }
+
+    const store = TestStore(PurchaseStore, {
+      initialState: { purchase: mockPurchase },
+      deps: { repository: mockRepo },
+    })
+
+    await store.send.submitClicked({ purchase: mockPurchase })
+
+    store.assertEventSequence([
+      {
+        event: PurchaseEvent.saveRequested({ id: '123' }),
+        state: { saving: true },
+      },
+      {
+        event: PurchaseEvent.saved({ purchase: savedPurchase }),
+        state: { saving: false, purchase: savedPurchase },
+      },
+    ])
+    store.assertNoRunningExecutors()
+  })
+
+  it('handles save failure', async () => {
+    const mockRepo = { save: vi.fn().mockRejectedValue(new Error('Network error')) }
+
+    const store = TestStore(PurchaseStore, {
+      deps: { repository: mockRepo },
+    })
+
+    await store.send.submitClicked({ purchase: mockPurchase })
+
+    store.assertState({ saving: false, error: 'Network error' })
+  })
+})
+```
+
+> [!TIP]
+> `TestStore.send()` flushes multiple rounds of microtasks internally. You don't need to add manual `setTimeout` or `flushPromises` calls -- just `await store.send(...)` and assert.
+
+## Next steps
+
+- [TestExecutor](/testing/test-executor/) -- Unit test executors in isolation
+- [TestReducer](/testing/test-reducer/) -- Test individual on() handlers

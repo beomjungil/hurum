@@ -1,0 +1,167 @@
+---
+title: Computed
+description: Computed 값은 의존성이 변경될 때 자동으로 재계산되는 파생 상태예요.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 페이지는 [Store](/ko/concepts/store/)에 대한 이해를 전제로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Computed 값은 파생 상태예요. Store의 상태 그래프의 일부로, 의존성이 변경될 때마다 자동으로 재계산돼요.
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as Error | null,
+  },
+})
+  .computed({
+    totalAmount: (state) =>
+      state.purchase?.items.reduce((sum, item) => sum + item.amount, 0) ?? 0,
+
+    isValid: (state) =>
+      state.purchase !== null && state.error === null,
+
+    // Computed can depend on other computed values
+    canSubmit: (state) =>
+      state.purchase !== null && state.error === null && !state.saving,
+  })
+```
+
+## 동작 방식
+
+Store 빌더 체인에서 `.computed()`로 Computed 값을 정의해요. 각 키는 현재 상태(다른 Computed 값 포함)를 받아 파생 값을 반환하는 함수에 매핑돼요.
+
+```ts
+.computed({
+  fullName: (state) => `${state.firstName} ${state.lastName}`,
+  isLongName: (state) => state.fullName.length > 20,
+})
+```
+
+### Proxy 기반 의존성 추적
+
+Hurum은 Proxy를 써서 각 Computed 함수가 실행 중에 어떤 상태 필드에 접근하는지 추적해요. Computed 함수가 `state.purchase`와 `state.items`를 읽으면, 이 두 필드가 변경될 때만 재계산돼요 -- `state.saving`이 변경될 때는 재계산되지 않아요.
+
+이건 자동으로 일어나요. 의존성을 수동으로 선언할 필요가 없어요.
+
+### 즉시 재계산 (Eager recalculation)
+
+Computed 값은 읽힐 때가 아니라, 추적된 의존성이 변경될 때 **즉시** 재계산돼요. 이건 다음을 의미해요:
+
+- Event 핸들러가 상태를 업데이트한 후, 영향받는 모든 Computed 값이 이미 최신 상태
+- `getState()`는 항상 최신 Computed 값을 반환
+- 구독자는 완전히 해결된 상태(원시 + Computed)로 알림을 받음
+
+```ts
+// After emitting PurchaseEvent.saved:
+// 1. .on handler updates state.purchase
+// 2. totalAmount, isValid, canSubmit recalculate immediately
+// 3. Subscribers see the fully updated state
+```
+
+### 참조 안정성
+
+Computed 함수가 이전 결과와 구조적으로 동일한 값을 반환하면, Hurum은 이전 참조를 유지해요. React에서 불필요한 리렌더링을 방지해요:
+
+```ts
+.computed({
+  // If the items array hasn't changed, the same reference is returned
+  activeItems: (state) =>
+    state.items.filter((item) => item.status === 'active'),
+})
+```
+
+구조적 동등성은 값의 깊은 비교를 의미해요. 새 배열이 같은 순서로 같은 요소를 가지고 있으면, 이전 배열 참조가 유지돼요.
+
+### Computed 간의 의존
+
+Computed 값은 같은 `state` 객체에서 다른 Computed 값을 읽을 수 있어요:
+
+```ts
+.computed({
+  subtotal: (state) =>
+    state.items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+
+  tax: (state) =>
+    state.subtotal * state.taxRate,
+
+  total: (state) =>
+    state.subtotal + state.tax,
+})
+```
+
+Hurum은 Store 생성 시점에 **위상 정렬(topological sort)**을 해서 올바른 평가 순서를 결정해요. `total`이 `subtotal`과 `tax`에 의존하면, Hurum은 `subtotal`과 `tax`가 먼저 계산되도록 보장해요.
+
+순환 의존성은 생성 시점에 감지되어 에러를 throw해요.
+
+## 자주 사용되는 패턴
+
+### 불리언 플래그
+
+```ts
+.computed({
+  isEmpty: (state) => state.items.length === 0,
+  hasError: (state) => state.error !== null,
+  isReady: (state) => !state.loading && state.data !== null,
+})
+```
+
+### 필터링/변환된 컬렉션
+
+```ts
+.computed({
+  completedTodos: (state) =>
+    state.todos.filter((todo) => todo.completed),
+
+  todoCount: (state) => ({
+    total: state.todos.length,
+    completed: state.todos.filter((t) => t.completed).length,
+    remaining: state.todos.filter((t) => !t.completed).length,
+  }),
+})
+```
+
+### 포맷팅된 표시 값
+
+```ts
+.computed({
+  displayPrice: (state) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: state.currency,
+    }).format(state.price),
+
+  lastUpdatedText: (state) =>
+    state.lastUpdated
+      ? new Intl.RelativeTimeFormat('en').format(
+          Math.round((state.lastUpdated - Date.now()) / 60000),
+          'minute',
+        )
+      : 'Never',
+})
+```
+
+## 트레이드오프
+
+즉시 재계산에는 비용이 있어요: 깊은 Computed 체인은 의존성이 변경될 때마다 재계산돼요. 대부분의 애플리케이션에서 이건 무시할 수 있는 수준이에요. 하지만 자주 변경되는 상태에 의존하는 연쇄된 Computed 값이 많으면 비용이 누적돼요.
+
+대안과의 비교:
+- **Zustand Selector**는 모든 상태 변경에서 모든 Selector를 실행해요. Hurum은 추적된 의존성이 변경된 것만 재계산해요.
+- **Reselect 메모이제이션**은 수동 의존성 선언이 필요해요. Hurum은 의존성을 자동으로 추적해요.
+- **MobX Computed**는 같은 Proxy 기반 추적을 사용해요. 트레이드오프는 비슷해요.
+
+Computed 체인이 성능 문제가 되면 다음을 고려하세요:
+- 비용이 큰 계산을 Event 핸들러로 이동 (읽을 때마다가 아닌, 쓸 때 한 번 계산)
+- 깊은 체인을 더 적은 수의 직접적인 계산으로 분리
+
+## 팁
+
+- **Computed 함수는 순수하게 유지하세요.** 사이드 이펙트 없음, 비동기 없음, 뮤테이션 없음. 상태의 순수한 파생이에요.
+- **적은 수의 큰 Computed보다 많은 수의 작은 Computed를 선호하세요.** `isValid`, `canSubmit`, `hasError`는 하나의 `formStatus` 객체보다 세 개의 별도 Computed 값이 더 좋아요. 작은 계산은 더 정확한 재계산과 더 나은 React 렌더 성능을 의미해요.
+- **원시 상태를 중복하지 마세요.** `state.name`이 이미 존재하면, `name: (state) => state.name`이라는 Computed를 만들지 마세요. 원시 상태에 직접 접근하세요.
+- **조건부 접근에 주의하세요.** Computed 함수가 `state.user?.name`을 읽으면, Proxy는 `state.user`만 추적해요. `user`가 `null`이면 `name`은 접근되지 않으므로 추적되지 않아요. 보통은 괜찮지만, 이 점을 인지하고 있어야 해요.

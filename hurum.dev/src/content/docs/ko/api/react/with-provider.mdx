@@ -1,0 +1,103 @@
+---
+title: withProvider
+description: "withProvider HOC의 API 레퍼런스예요."
+---
+
+```tsx
+import { withProvider } from '@hurum/react'
+```
+
+## `withProvider(StoreDef, Component)`
+
+컴포넌트를 `StoreProvider`로 감싸고 `StoreDef.create()`로 자동으로 새 Store 인스턴스를 생성하는 고차 컴포넌트예요. 래핑된 컴포넌트의 각 마운트마다 독립된 Store를 갖게 돼요.
+
+### 시그니처
+
+```ts
+function withProvider<P extends object>(
+  def: StoreDefinition,
+  Component: React.ComponentType<P>,
+): React.ComponentType<P>
+```
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `def` | `StoreDefinition` | 제공할 Store 정의. |
+| `Component` | `React.ComponentType<P>` | 래핑할 컴포넌트. |
+
+### 반환값
+
+원본과 동일한 props를 가진 새 컴포넌트. 내부적으로 `<StoreProvider of={def} store={...}><Component {...props} /></StoreProvider>`를 렌더링해요.
+
+### Import
+
+```ts
+import { withProvider } from '@hurum/react'
+```
+
+### 예제
+
+```tsx
+function CartPage() {
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  return <div>{items.length} items</div>
+}
+
+// Provider로 래핑 -- 각 마운트마다 새로운 Store 생성
+const CartPageWithProvider = withProvider(CartStore, CartPage)
+
+function App() {
+  return <CartPageWithProvider />
+}
+```
+
+---
+
+## 작동 방식
+
+내부적으로 `withProvider`는 `useState`를 사용해서 Store 인스턴스를 생성해요:
+
+```tsx
+// 단순화된 내부 구현
+function WithProvider(props) {
+  const [store] = useState(() => def.create())
+  return (
+    <StoreProvider of={def} store={store}>
+      <WrappedComponent {...props} />
+    </StoreProvider>
+  )
+}
+```
+
+Store 인스턴스는 `useState`의 초기화 함수로 한 번만 생성되고 컴포넌트의 수명 동안 유지돼요.
+
+---
+
+## 사용 시기
+
+`withProvider`를 사용하는 경우:
+- 컴포넌트 마운트마다 새로운 독립 Store가 필요할 때.
+- 런타임에 `initialState`나 `deps`를 커스터마이즈할 필요가 없을 때.
+- `StoreProvider`를 수동으로 연결하는 대신 간결한 한 줄 표현이 필요할 때.
+
+`StoreProvider`를 직접 사용하는 경우:
+- `initialState`나 `deps`를 전달해야 할 때.
+- Store의 생명주기를 제어해야 할 때 (예: 공유 인스턴스, 해제 타이밍).
+- 여러 컴포넌트가 동일한 스코프 인스턴스를 공유해야 할 때.
+
+---
+
+## Display Name
+
+래핑된 컴포넌트는 React DevTools에서 쉽게 디버깅할 수 있도록 `withProvider(OriginalName)` 형식의 `displayName`을 받아요.
+
+---
+
+## 참고사항
+
+- `withProvider`는 `Store.create()`에 대한 옵션을 받지 않아요. 커스텀 초기화가 필요하면 `StoreProvider`를 직접 사용하세요.
+- Store 인스턴스는 리렌더링 간에 유지되지만, 래핑된 컴포넌트의 서로 다른 마운트 간에는 공유되지 않아요.
+- `StoreProvider`와 마찬가지로 `withProvider`는 언마운트 시 Store를 자동으로 해제하지 않아요.

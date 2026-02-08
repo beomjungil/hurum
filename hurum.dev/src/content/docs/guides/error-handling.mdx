@@ -1,0 +1,237 @@
+---
+title: "Error Handling"
+description: "Validate, catch errors, and manage failure states through events."
+---
+
+> [!TIP] Before reading
+> This guide builds on [CommandExecutor](/concepts/command-executor/) and [Intent](/concepts/intent/). Read those first if you haven't.
+
+Errors in Hurum follow the same path as everything else: executors catch them and emit events. There are no special error channels or try/catch wrappers at the framework level. This gives you full control over how errors appear in your state.
+
+Two patterns cover most scenarios: **validation with sequential intents** and **error events from executors**.
+
+## Pattern 1: Validation with sequential intents
+
+When a user submits a form, you usually want to validate first, then save. If validation fails, the save should never run.
+
+Sequential intents handle this naturally. When an executor throws, the remaining commands in the intent are skipped.
+
+### Define the events
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+interface ValidationError {
+  field: string
+  message: string
+}
+
+const PurchaseEvent = Events('Purchase', {
+  validated: Event<{ purchase: Purchase }>(),
+  validationFailed: Event<{ errors: ValidationError[] }>(),
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+### The validation executor
+
+The validation executor emits either `validated` or `validationFailed`. On failure, it throws to stop the intent chain:
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+const [ValidateCommand, ValidateExecutor] = CommandExecutor<
+  { purchase: Purchase }
+>((command, { emit }) => {
+  const errors = validate(command.purchase)
+
+  if (errors.length > 0) {
+    emit(PurchaseEvent.validationFailed({ errors }))
+    throw new Error('Validation failed')  // Stops the intent chain
+  }
+
+  emit(PurchaseEvent.validated({ purchase: command.purchase }))
+})
+```
+
+The `throw` is the key part. It tells Hurum to stop executing the remaining commands in this intent. The `SaveCommand` never runs.
+
+### The save executor
+
+The save executor only runs if validation passes:
+
+```ts
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+### Wire them together
+
+The intent lists commands in order. Validate first, then save:
+
+```ts
+import { Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(ValidateCommand, SavePurchaseCommand),
+})
+```
+
+When the user clicks submit:
+1. `ValidateCommand` runs first
+2. If validation fails: `validationFailed` is emitted, the throw stops the chain, `SavePurchaseCommand` never runs
+3. If validation passes: `validated` is emitted, then `SavePurchaseCommand` runs normally
+
+### The store
+
+Handle all events in one place:
+
+```ts
+import { Store } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    validationErrors: [] as ValidationError[],
+    saveError: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    validated: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      validationErrors: [],
+    }),
+    validationFailed: (state, { errors }) => ({
+      ...state,
+      validationErrors: errors,
+    }),
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      saveError: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      saveError: error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(ValidateExecutor, SavePurchaseExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+## Pattern 2: Error events in executors
+
+For errors that happen inside a single executor (like a network failure), catch the error and emit an event. Do not let exceptions propagate unhandled.
+
+```ts
+const [LoadCommand, LoadExecutor] = CommandExecutor<
+  { id: string },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.loadRequested({ id: command.id }))
+  if (signal.aborted) return
+
+  try {
+    const purchase = await deps.purchaseRepository.findById(command.id)
+    if (signal.aborted) return
+    emit(PurchaseEvent.loaded({ purchase }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(PurchaseEvent.loadFailed({
+      error: { code: 'LOAD_ERROR', message: (error as Error).message },
+    }))
+  }
+})
+```
+
+The try/catch is inside the executor. The store never sees the exception -- it only sees the `loadFailed` event with a clean, typed error payload.
+
+## Middleware onError
+
+If an executor throws without catching the error, Hurum's middleware `onError` hook catches it. This is your safety net for unhandled errors:
+
+```ts
+const errorLoggingMiddleware: Middleware = {
+  onError(error, context) {
+    console.error('Unhandled executor error:', error.message)
+    console.error('Intent:', context.intent)
+    console.error('Command:', context.command)
+    // Report to error tracking service
+    errorTracker.report(error, { intent: context.intent })
+  },
+}
+
+const MyStore = Store({ state: { ... } })
+  .middleware(errorLoggingMiddleware)
+  // ...
+```
+
+Use `onError` for logging and monitoring, not for state transitions. State should always change through events.
+
+## Displaying errors in React
+
+Error events are just regular events. Handle them in `on` handlers, then read the state in your components:
+
+```tsx
+function PurchaseForm() {
+  const store = useStore(PurchaseStore)
+  const validationErrors = store.use.validationErrors()
+  const saveError = store.use.saveError()
+  const saving = store.use.saving()
+
+  return (
+    <form onSubmit={(e) => {
+      e.preventDefault()
+      store.send.submitButtonClicked({ purchase })
+    }}>
+      {validationErrors.length > 0 && (
+        <ul className="errors">
+          {validationErrors.map((err) => (
+            <li key={err.field}>{err.field}: {err.message}</li>
+          ))}
+        </ul>
+      )}
+
+      {saveError && (
+        <div className="error">Save failed: {saveError.message}</div>
+      )}
+
+      <button type="submit" disabled={saving}>
+        {saving ? 'Saving...' : 'Submit'}
+      </button>
+    </form>
+  )
+}
+```
+
+## Key points
+
+- **Sequential intents stop on throw.** This is the validation pattern. List `ValidateCommand` before `SaveCommand`, and throw from the validator to block the save.
+- **Error events are regular events.** There is no special error type. Define them in your `Events()` group and handle them in `on` just like any other event.
+- **Catch errors inside executors.** Do not let exceptions leak out. Convert them to typed error events so the store can handle them predictably.
+- **Middleware `onError` is a safety net.** Use it for logging, not state management. If you find yourself handling errors in `onError`, move that logic into the executor as an error event instead.
+- **Clear error state at the right time.** When the user retries an action, clear the previous error in the "requested" handler so stale errors don't linger.

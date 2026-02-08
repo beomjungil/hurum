@@ -1,0 +1,228 @@
+---
+title: "비동기 작업"
+description: "CommandExecutor로 API 호출, 로딩 상태, 에러 흐름을 처리해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 가이드는 [빠른 시작](/ko/getting-started/quick-start/)과 [CommandExecutor](/ko/concepts/command-executor/)를 기반으로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+대부분의 실제 애플리케이션에는 비동기 작업이 필요해요: API 호출, 파일 업로드, WebSocket 메시지 등. Hurum에서 비동기 로직은 `CommandExecutor` 내부에 존재해요. Executor는 작업이 진행되면서 Event를 emit하고, `Store.on` 핸들러가 이에 반응해서 상태를 전환해요.
+
+모든 비동기 작업은 동일한 패턴을 따라요: "requested" Event를 emit하고, 작업을 수행한 다음, 성공 또는 실패 Event를 emit해요.
+
+## 비동기 CRUD 패턴
+
+구매 저장 흐름의 전체 예시예요. Event부터 시작해요:
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+interface Purchase {
+  id: string
+  name: string
+  amount: number
+}
+
+interface SaveError {
+  code: string
+  message: string
+}
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+세 개의 Event로, 각 단계에 하나씩 대응해요: 작업이 시작됨, 성공함, 또는 실패함. 이것들은 UI가 어떻게 생겼든 기록될 사실(fact)이에요.
+
+## Executor
+
+Executor는 실제 작업을 수행해요. 첫 번째 타입 매개변수로 Command 입력 타입을, 두 번째로 의존성을 선언해요:
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+interface PurchaseRepository {
+  save(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+}
+
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  // 1. Emit "requested" immediately — this sets the loading state
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+
+  // 2. Check if we were cancelled before starting the network call
+  if (signal.aborted) return
+
+  // 3. Do the async work
+  const result = await deps.purchaseRepository.save(command.purchase)
+
+  // 4. Check again after the await — the user may have cancelled while waiting
+  if (signal.aborted) return
+
+  // 5. Emit success or failure
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+`signal.aborted` 체크에 주목하세요. 이것이 취소 체크포인트예요. 저장이 진행 중일 때 사용자가 다른 페이지로 이동하거나 "취소"를 클릭하면, signal이 중단되고 Executor는 Event emit을 중지해요.
+
+## Store
+
+Store는 각 Event를 순수 상태 전환으로 처리해요:
+
+```ts
+import { Store, Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SavePurchaseCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SavePurchaseExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+각 `on` 핸들러는 순수 함수예요. `saveRequested`는 로딩 플래그를 설정해요. `saved`는 결과를 저장하고 로딩을 해제해요. `saveFailed`는 에러를 저장하고 로딩을 해제해요. 간단하고, 예측 가능하고, 테스트 가능해요.
+
+## React에서 사용하기
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function SaveButton() {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+  const error = store.use.error()
+
+  const handleSave = () => {
+    store.send.saveClicked({ purchase: { id: '1', name: 'Widget', amount: 100 } })
+  }
+
+  return (
+    <div>
+      <button onClick={handleSave} disabled={saving}>
+        {saving ? 'Saving...' : 'Save'}
+      </button>
+      {error && <p className="error">{error.message}</p>}
+    </div>
+  )
+}
+```
+
+## 핵심 포인트
+
+### 항상 "requested"를 먼저 emit하세요
+
+Executor가 가장 먼저 해야 할 일은 "requested" 또는 "started" Event를 emit하는 거예요. 이렇게 하면 비동기 작업이 시작되기 전에 Store가 즉시 로딩 상태로 전환돼요. UI가 바로 업데이트돼요.
+
+```ts
+// Good — UI shows loading immediately
+emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+const result = await deps.purchaseRepository.save(command.purchase)
+
+// Bad — UI stays in previous state until the API responds
+const result = await deps.purchaseRepository.save(command.purchase)
+emit(PurchaseEvent.saved({ purchase: result }))
+```
+
+### emit은 동기적이에요
+
+`emit()`을 호출하면, Event가 Store에 즉시 동기적으로 적용돼요. 상태 리스너는 `emit()`이 반환되기 전에 알림을 받아요. 즉, `emit()` 직후에 `getState()`를 호출하면 업데이트된 상태가 반영돼요:
+
+```ts
+emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+// getState().saving is now true
+```
+
+### 모든 await 주변에서 signal.aborted를 확인하세요
+
+각 `await`는 작업이 취소되었을 수 있는 지점이에요. 비동기 경계 이후에 Event를 emit하기 전에 항상 `signal.aborted`를 확인하세요:
+
+```ts
+const data = await deps.api.fetchData()
+if (signal.aborted) return  // Don't emit if cancelled
+
+const processed = await deps.processor.transform(data)
+if (signal.aborted) return  // Check again after second await
+
+emit(DataEvent.processed({ data: processed }))
+```
+
+### 사이드 이펙트당 하나의 Executor
+
+Executor는 단일 작업에 집중하세요. "저장" 전에 유효성 검증이 필요하다면, 저장 Executor 안에 유효성 검증을 넣는 대신 [순차적 Intent](/ko/guides/error-handling/)를 사용하세요:
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  submitClicked: Intent(ValidateCommand, SavePurchaseCommand),
+})
+```
+
+이렇게 하면 각 Executor를 작고 테스트하기 쉽게 유지하고, 단계 사이에 명확한 취소 지점을 확보할 수 있어요.
+
+## 리소스 로딩
+
+읽기 작업에도 동일한 패턴이 적용돼요. 다음은 fetch Executor예요:
+
+```ts
+const PurchaseEvent = Events('Purchase', {
+  loadRequested: Event<{ id: string }>(),
+  loaded: Event<{ purchase: Purchase }>(),
+  loadFailed: Event<{ error: Error }>(),
+})
+
+const [LoadPurchaseCommand, LoadPurchaseExecutor] = CommandExecutor<
+  { id: string },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.loadRequested({ id: command.id }))
+
+  if (signal.aborted) return
+
+  try {
+    const purchase = await deps.purchaseRepository.findById(command.id)
+    if (signal.aborted) return
+    emit(PurchaseEvent.loaded({ purchase }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(PurchaseEvent.loadFailed({ error: error as Error }))
+  }
+})
+```
+
+구조는 동일해요: requested, 그다음 성공 또는 실패. 이 패턴을 한 번 익히면, 앱의 모든 비동기 작업에 적용할 수 있어요.

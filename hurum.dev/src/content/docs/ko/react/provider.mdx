@@ -1,0 +1,325 @@
+---
+title: "Provider & withProvider"
+description: "스코프 Store 인스턴스가 필요한 이유, 그리고 StoreProvider가 싱글턴의 한계를 해결하는 방법이에요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## 싱글턴의 문제
+
+`useStore(Def)`를 Provider 외부에서 사용하면 전역 싱글턴을 읽어요. 이는 진정한 전역 상태 — 인증 토큰, 테마 설정, 기능 플래그 — 에는 적합해요. 하지만 많은 Store는 전역이 아니에요.
+
+싱글턴이 문제가 되는 세 가지 상황을 살펴볼게요.
+
+### 1. 같은 컴포넌트가 여러 번 나타나는 경우
+
+대시보드가 세 개의 차트 위젯을 렌더링해요. 각 차트는 자체적인 로딩 상태, 데이터, 줌 레벨을 가져요. `ChartStore`가 싱글턴이라면, 세 차트 모두 같은 상태를 공유해요 — 한 차트를 로딩하면 세 차트 모두에 스피너가 표시돼요. 한 차트를 줌하면 모든 차트가 줌돼요.
+
+```tsx
+// 싱글턴으로는 동작하지 않습니다
+function Dashboard() {
+  return (
+    <div>
+      <ChartWidget data={salesData} />   {/* 와 상태를 공유 */}
+      <ChartWidget data={trafficData} /> {/* 와 상태를 공유 */}
+    </div>
+  )
+}
+```
+
+독립적인 Store 인스턴스가 필요해요 — 차트마다 하나씩.
+
+### 2. 리스트의 Nested Store
+
+`PurchaseStore`를 `Nested.array(ItemStore)`로 정의했어요. 부모는 `scope.items`로 자식 Store 인스턴스를 관리해요. 이제 두 개의 구매를 나란히 열어요 — 기존 주문과 새 초안.
+
+PurchaseStore가 싱글턴이라면, 두 구매 양식 모두 같은 아이템 배열, 같은 저장 상태, 같은 에러 상태를 공유해요. 한 구매를 수정하면 다른 구매도 수정돼요.
+
+```tsx
+// 두 양식 모두 같은 싱글턴을 읽습니다
+function App() {
+  return (
+    <>
+      <PurchaseForm purchaseId="order-123" />
+      <PurchaseForm purchaseId="new-draft" />
+    </>
+  )
+}
+```
+
+각 구매는 자체적인 Store 인스턴스가 필요하며, 각각 자체적인 nested item Store를 가져야 해요.
+
+### 3. 서버 데이터를 사용하는 페이지 수준 상태
+
+상품 상세 페이지가 서버 데이터를 받아서 해당 상품으로 Store를 초기화해요. 사용자가 다른 상품으로 이동할 때, Store는 새로운 상태가 필요해요 — 이전 상품의 남은 데이터가 아닌.
+
+싱글턴은 네비게이션을 넘어 지속돼요. 이전 페이지의 Executor가 여전히 실행 중일 수 있기 때문에 깔끔하게 "재설정"할 방법이 없어요.
+
+---
+
+## StoreProvider
+
+`StoreProvider`는 이 세 가지 문제를 모두 해결해요. **스코프 Store 인스턴스** — 자식 컴포넌트만 볼 수 있는 독립적인 Store 복사본 — 를 생성해요.
+
+자연스러운 패턴은 각 컴포넌트가 자체 Store를 생성하는 거예요. 컴포넌트가 Store를 소유하고, 자식을 `StoreProvider`로 감싸면, 외부 세계는 이를 알 필요가 없어요:
+
+```tsx
+import { useState } from 'react'
+import { useStore, StoreProvider } from '@hurum/react'
+import { ChartStore } from './store'
+
+function ChartWidget({ data, title }: { data: ChartData; title: string }) {
+  const [store] = useState(() => ChartStore.create({
+    initialState: { data, title },
+  }))
+
+  return (
+    <StoreProvider of={ChartStore} store={store}>
+      <ChartContent />
+    </StoreProvider>
+  )
+}
+
+function ChartContent() {
+  const store = useStore(ChartStore)
+  const title = store.use.title()
+  const loading = store.use.loading()
+  return <div>{title}: {loading ? 'Loading...' : 'Ready'}</div>
+}
+
+// 부모는 그냥 컴포넌트를 사용합니다. Store 배관 작업이 필요 없습니다.
+function Dashboard() {
+  return (
+    <div className="grid">
+      <ChartWidget data={salesData} title="Sales" />
+      <ChartWidget data={trafficData} title="Traffic" />
+    </div>
+  )
+}
+```
+
+각 `ChartWidget`이 자체 Store 인스턴스를 생성하고 소유해요. `Dashboard`는 Store에 대해 알 필요도, 관심을 가질 필요도 없어요 — 그저 props와 함께 컴포넌트를 렌더링할 뿐이에요. `StoreProvider` 내부에서 `useStore(ChartStore)`는 스코프 인스턴스를 반환해요. Provider 외부에서는 전역 싱글턴으로 폴백해요.
+
+### StoreProvider props
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `of` | `StoreDefinition` | 스코프 인스턴스를 제공할 Store 정의 |
+| `store` | `StoreInstance` (선택) | `Store.create()`로 생성된 Store 인스턴스. 생략 시 기본값으로 자동 생성 |
+| `initialState` | `Partial<RawState>` (선택) | `store` 생략 시, 자동 생성 인스턴스의 초기 상태 |
+| `deps` | `Partial<Deps>` (선택) | `store` 생략 시, 자동 생성 인스턴스의 의존성 |
+| `children` | `ReactNode` | 이 인스턴스에 접근하는 컴포넌트 트리 |
+
+### StoreProvider 사용 방식
+
+`StoreProvider`는 세 가지 방식으로 사용할 수 있어요:
+
+```tsx
+// 1. 미리 생성한 인스턴스 제공
+<StoreProvider of={PurchaseStore} store={instance}>
+  <PurchaseContent />
+</StoreProvider>
+
+// 2. 기본값으로 자동 생성
+<StoreProvider of={PurchaseStore}>
+  <PurchaseContent />
+</StoreProvider>
+
+// 3. initialState / deps와 함께 자동 생성
+<StoreProvider of={PurchaseStore} initialState={{ purchase: serverData }} deps={{ repository }}>
+  <PurchaseContent />
+</StoreProvider>
+```
+
+### 인스턴스 생성
+
+`Store.create()`를 사용해서 스코프 인스턴스를 생성해요. 리렌더링 간 안정성을 유지하려면 `useState`로 감싸세요.
+
+```tsx
+const [store] = useState(() => PurchaseStore.create({
+  initialState: { purchase: serverData },  // 기본값과 deep merge
+  deps: { repository: new PurchaseRepository() },  // shallow merge
+}))
+```
+
+`initialState`와 `deps` 모두 선택사항이에요. merge 동작 세부사항은 [Scoped Instances](/ko/react/scoped-instances/)를 참조하세요.
+
+---
+
+## Nested Store와 StoreProvider
+
+`StoreProvider`가 필수적인 경우예요. Store가 `Nested.array`나 `Nested.map`을 사용할 때, 부모 Store는 내부적으로 자식 인스턴스를 관리해요. 하지만 여러 독립적인 복사본을 원한다면 부모 자체가 스코프 인스턴스여야 해요.
+
+```tsx
+import { useStore, StoreProvider } from '@hurum/react'
+import { PurchaseStore } from './store'  // Nested.array(ItemStore)를 가짐
+
+function PurchaseForm({ serverData }: { serverData: Purchase }) {
+  const [store] = useState(() => PurchaseStore.create({
+    initialState: {
+      id: serverData.id,
+      items: serverData.items,  // Hurum이 자동으로 자식 ItemStore 인스턴스 생성
+    },
+    deps: { repository: new PurchaseRepository() },
+  }))
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const total = store.use.total()           // 자식 아이템으로부터 계산됨
+  const itemStores = store.scope.items      // 자식 Store 인스턴스
+
+  return (
+    <div>
+      <h2>Total: ${total}</h2>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+      <button onClick={() => store.send.addItemClicked({
+        id: crypto.randomUUID(), name: '', price: 0
+      })}>
+        Add Item
+      </button>
+    </div>
+  )
+}
+
+function ItemRow({ store: itemStore }: { store: StoreInstance }) {
+  const store = useStore(itemStore)
+  const name = store.use.name()
+  const price = store.use.price()
+  // 자신의 name이나 price가 변경될 때만 이 행이 리렌더링됨
+
+  return (
+    <div>
+      <input
+        value={name}
+        onChange={(e) => store.send.nameEdited({
+          id: store.getState().id, name: e.target.value
+        })}
+      />
+      <input
+        type="number"
+        value={price}
+        onChange={(e) => store.send.priceEdited({
+          id: store.getState().id, price: Number(e.target.value)
+        })}
+      />
+    </div>
+  )
+}
+```
+
+이제 두 구매 양식을 나란히 렌더링할 수 있어요. 각각은 자체적인 아이템, 자체적인 저장 상태, 모든 것을 가져요.
+
+```tsx
+function App() {
+  return (
+    <>
+      <PurchaseForm serverData={existingOrder} />
+      <PurchaseForm serverData={newDraft} />
+    </>
+  )
+}
+```
+
+---
+
+## withProvider
+
+때로는 더 간단한 보장이 필요해요. **이 컴포넌트를 마운트할 때마다 새로운 Store를 받는다.** 이것이 `withProvider`가 하는 일이에요.
+
+`withProvider`는 독립 함수로, Store 정의와 컴포넌트를 인자로 받아요:
+
+```tsx
+import { useStore, withProvider } from '@hurum/react'
+import { ChartStore } from './store'
+
+const UploadModal = withProvider(ChartStore, function UploadModal() {
+  const store = useStore(ChartStore)
+  const progress = store.use.uploadProgress()
+
+  return (
+    <dialog>
+      <p>Upload progress: {progress}%</p>
+      <button onClick={() => store.send.uploadStarted({ file })}>
+        Upload
+      </button>
+    </dialog>
+  )
+})
+```
+
+`<UploadModal />`이 마운트될 때마다 기본 상태로 새 `ChartStore` 인스턴스가 생성돼요. 언마운트되면 인스턴스는 더 이상 사용되지 않아요. 명시적인 `Store.create()`, `useState`, Provider 보일러플레이트가 필요 없어요.
+
+### 어느 것을 사용할지
+
+| 시나리오 | 사용 |
+|----------|-----|
+| props나 서버로부터 `initialState` 필요 | **StoreProvider** + `Store.create()` |
+| 인스턴스마다 커스텀 `deps` 필요 | **StoreProvider** + `Store.create()` |
+| 마운트마다 새로운 격리된 인스턴스만 필요 | **withProvider** |
+| 모달, 위저드, 일회성 다이얼로그 | **withProvider** |
+| nested Store가 있는 리스트 아이템 | **StoreProvider** (부모가 제공, 자식이 scope로 소비) |
+
+---
+
+## 여러 Provider
+
+다른 Store의 여러 `StoreProvider`를 중첩할 수 있어요.
+
+```tsx
+<StoreProvider of={AuthStore} store={authStore}>
+  <StoreProvider of={PurchaseStore} store={purchaseStore}>
+    <PurchaseContent />
+  </StoreProvider>
+</StoreProvider>
+```
+
+또는 같은 Store의 `StoreProvider`를 중첩할 수 있어요 — 내부 것이 우선해요.
+
+```tsx
+<StoreProvider of={CounterStore} store={outerStore}>
+  <div>
+    <Counter /> {/* outerStore를 읽습니다 */}
+    <StoreProvider of={CounterStore} store={innerStore}>
+      <Counter /> {/* innerStore를 읽습니다 */}
+    </StoreProvider>
+  </div>
+</StoreProvider>
+```
+
+### 자동 dispose 없음
+
+`StoreProvider`는 언마운트 시 Store를 **자동으로 dispose하지 않아요**. 이는 의도적이에요 — React Strict Mode는 개발 중에 컴포넌트를 두 번 마운트하고 언마운트해요. 첫 번째 언마운트에서 자동 dispose하면 두 번째 마운트 전에 Store가 파괴돼요.
+
+보장된 정리가 필요한 경우 (예: 언마운트 시 진행 중인 API 호출 중단), 명시적으로 처리하세요.
+
+```tsx
+function ScopedPurchase() {
+  const [store] = useState(() => PurchaseStore.create())
+
+  useEffect(() => {
+    return () => store.dispose()
+  }, [store])
+
+  return (
+    <StoreProvider of={PurchaseStore} store={store}>
+      <PurchaseContent />
+    </StoreProvider>
+  )
+}
+```
+
+대부분의 경우, 언마운트 후 참조가 남아있지 않으면 가비지 컬렉터가 자연스럽게 정리를 처리해요.
+
+## 다음 단계
+
+- [Scoped Instances](/ko/react/scoped-instances/) — `Store.create()` 세부사항: merge 동작, disposal, SSR
+- [useStore](/ko/react/use-store/) — Provider context를 해결하는 Hook

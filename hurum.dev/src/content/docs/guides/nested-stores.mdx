@@ -1,0 +1,397 @@
+---
+title: "Working with Nested Stores"
+description: "Compose parent-child store hierarchies with event relay and scope access."
+---
+
+> [!TIP] Before reading
+> This guide builds on [Nested Store](/concepts/nested-store/). Read that first if you haven't.
+
+Real applications have hierarchical state. A purchase has line items. A todo list has individual todos. A settings page has sections, each with their own form state. Hurum handles this with nested stores: a parent store that manages child store instances, with events flowing between them.
+
+## When to use nested stores
+
+Use nested stores when:
+- A child entity has its own lifecycle (add, remove, update independently)
+- You want child components to re-render only when their own state changes, not when sibling state changes
+- The child has its own intents and executors (e.g., each todo item can be independently saved)
+
+Do not use nested stores for simple derived state. If you just need to group properties, use plain objects in your state and computed values.
+
+## The three nested types
+
+```ts
+import { Nested } from '@hurum/core'
+
+Store({
+  state: {
+    settings: Nested(SettingsStore),           // Single child
+    items: Nested.array(ItemStore),            // Array of children (keyed by id)
+    currencies: Nested.map(CurrencyStore),     // Keyed map of children
+  },
+})
+```
+
+- **`Nested(Store)`** -- One child instance. Good for 1:1 relationships (a purchase has one transaction).
+- **`Nested.array(Store)`** -- Array of child instances, each identified by an `id` field. Good for lists.
+- **`Nested.map(Store)`** -- Map of child instances keyed by string. Good for lookup tables.
+
+## Full example: Purchase with items
+
+Let's build a purchase form with a dynamic list of line items. Each item can be edited independently.
+
+### Step 1: Define the item store
+
+```ts
+import { Events, Event, CommandExecutor, Intents, Intent, Store } from '@hurum/core'
+
+// Item events
+const ItemEvent = Events('Item', {
+  nameChanged: Event<{ id: string; name: string }>(),
+  priceChanged: Event<{ id: string; price: number }>(),
+  removed: Event<{ id: string }>(),
+})
+
+// Item executors
+const [ChangeNameCommand, ChangeNameExecutor] = CommandExecutor<
+  { id: string; name: string }
+>((command, { emit }) => {
+  emit(ItemEvent.nameChanged(command))
+})
+
+const [ChangePriceCommand, ChangePriceExecutor] = CommandExecutor<
+  { id: string; price: number }
+>((command, { emit }) => {
+  emit(ItemEvent.priceChanged(command))
+})
+
+// Item intents
+const ItemIntents = Intents('Item', {
+  nameEdited: Intent(ChangeNameCommand),
+  priceEdited: Intent(ChangePriceCommand),
+})
+
+// Item store
+const ItemStore = Store({
+  state: {
+    id: '',
+    name: '',
+    price: 0,
+  },
+})
+  .on(ItemEvent, {
+    nameChanged: (state, { id, name }) => {
+      if (state.id !== id) return state  // Guard: only update matching item
+      return { ...state, name }
+    },
+    priceChanged: (state, { id, price }) => {
+      if (state.id !== id) return state
+      return { ...state, price }
+    },
+  })
+  .intents(ItemIntents)
+  .executors(ChangeNameExecutor, ChangePriceExecutor)
+```
+
+Notice the **id guard** in each `on` handler: `if (state.id !== id) return state`. This is essential for `Nested.array`. When a parent forwards an event to all children, each child checks whether the event is for them. If not, they return state unchanged (no re-render).
+
+### Step 2: Define the parent store
+
+```ts
+import { Nested } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  itemAdded: Event<{ id: string; name: string; price: number }>(),
+  itemRemoved: Event<{ id: string }>(),
+  saveRequested: Event(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+const [AddItemCommand, AddItemExecutor] = CommandExecutor<
+  { id: string; name: string; price: number }
+>((command, { emit }) => {
+  emit(PurchaseEvent.itemAdded(command))
+})
+
+const [RemoveItemCommand, RemoveItemExecutor] = CommandExecutor<
+  { id: string }
+>((command, { emit }) => {
+  emit(PurchaseEvent.itemRemoved(command))
+})
+
+const PurchaseIntents = Intents('Purchase', {
+  addItemClicked: Intent(AddItemCommand),
+  removeItemClicked: Intent(RemoveItemCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    id: '',
+    items: Nested.array(ItemStore),  // Array of nested child stores
+  },
+})
+  .on(PurchaseEvent, {
+    itemAdded: (state, { id, name, price }) => ({
+      ...state,
+      items: [...state.items, { id, name, price }],
+    }),
+    itemRemoved: (state, { id }) => ({
+      ...state,
+      items: state.items.filter((item) => item.id !== id),
+    }),
+  })
+  .computed({
+    total: (state) =>
+      state.items.reduce((sum, item) => sum + item.price, 0),
+    itemCount: (state) => state.items.length,
+  })
+  .intents(PurchaseIntents)
+  .executors(AddItemExecutor, RemoveItemExecutor)
+```
+
+The parent's `on` handler for `itemAdded` appends a new plain object to the `items` array. Hurum automatically creates a new child `ItemStore` instance for the new entry. Similarly, removing an item from the array disposes the corresponding child store.
+
+The `computed` values (`total`, `itemCount`) recalculate whenever any child's state changes.
+
+### Step 3: React rendering
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function PurchaseForm() {
+  const store = useStore(PurchaseStore)
+  const total = store.use.total()
+  const itemCount = store.use.itemCount()
+  const itemStores = store.scope.items  // Array of child store instances
+
+  return (
+    <div>
+      <h2>Purchase ({itemCount} items, total: ${total})</h2>
+
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+
+      <button onClick={() => {
+        const id = crypto.randomUUID()
+        store.send.addItemClicked({ id, name: '', price: 0 })
+      }}>
+        Add Item
+      </button>
+    </div>
+  )
+}
+
+function ItemRow({ store }: { store: StoreInstance }) {
+  // This component only re-renders when THIS item's state changes
+  const itemStore = useStore(store)
+  const name = itemStore.use.name()
+  const price = itemStore.use.price()
+  const id = itemStore.getState().id
+
+  return (
+    <div>
+      <input
+        value={name}
+        onChange={(e) => itemStore.send.nameEdited({ id, name: e.target.value })}
+      />
+      <input
+        type="number"
+        value={price}
+        onChange={(e) => itemStore.send.priceEdited({ id, price: Number(e.target.value) })}
+      />
+    </div>
+  )
+}
+```
+
+Each `ItemRow` component receives its own store instance via `store.scope.items`. When you edit one item's name, only that `ItemRow` re-renders. The parent and sibling items are not affected.
+
+## Event flow in nested stores
+
+Events flow in two directions:
+
+### Parent to children (forwarding)
+
+When a parent event is applied, it is automatically forwarded to all child stores. Children with matching `on` handlers process it; children without matching handlers ignore it.
+
+This is how parent events can affect children. For example, a "clear all" event on the parent could reset each child.
+
+### Children to parent (bubbling)
+
+When a child emits an event, the parent is notified. The parent can:
+1. Handle the event in its own `on` handlers
+2. Relay the event to produce new events via `.relay()`
+3. Pass it through to subscribers
+
+### Relay: Transforming child events
+
+Use `.relay()` to react to child events at the parent level. For example, recalculating a total when an item price changes:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    items: Nested.array(ItemStore),
+    lastUpdated: null as string | null,
+  },
+})
+  .relay(ItemEvent.priceChanged, (event, state) => {
+    // Return additional events to emit when a child's price changes
+    return [PurchaseEvent.recalculated({ timestamp: new Date().toISOString() })]
+  })
+  .on(PurchaseEvent.recalculated, (state, { timestamp }) => ({
+    ...state,
+    lastUpdated: timestamp,
+  }))
+```
+
+The relay handler receives the child's event and the parent's current state, and returns an array of new events to emit on the parent.
+
+## Scope access
+
+`store.scope` gives you direct access to child store instances:
+
+```ts
+const store = PurchaseStore.create({ ... })
+
+// Nested(single) — direct reference
+store.scope.settings  // StoreInstance of SettingsStore
+
+// Nested.array — array of instances
+store.scope.items     // StoreInstance[] of ItemStore
+store.scope.items[0].send.nameEdited({ id: '1', name: 'Updated' })
+
+// Nested.map — Map of instances
+store.scope.currencies  // Map<string, StoreInstance> of CurrencyStore
+store.scope.currencies.get('USD')?.getState()
+```
+
+Executors can also access scope. This lets a parent executor delegate work to a child:
+
+```ts
+const [SaveAllCommand, SaveAllExecutor] = CommandExecutor<
+  {},
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, scope }) => {
+  const itemStores = scope.items as StoreInstance[]
+
+  for (const itemStore of itemStores) {
+    const item = itemStore.getState()
+    // Read child state and include in parent save
+  }
+
+  emit(PurchaseEvent.saveRequested())
+  // ...
+})
+```
+
+## Cross-store computed
+
+When you nest multiple stores in a root store, the parent's `.computed()` can read from any child's state. This is how you derive values that span multiple aggregates — without coupling the children to each other.
+
+```ts
+const AppStore = Store({
+  state: {
+    todos: Nested(TodoStore),
+    projects: Nested.map(ProjectStore),
+    modal: Nested(TodoDetailModalStore),
+  },
+})
+  .computed({
+    // Cross-store: reads modal state + todo state
+    openTodo: (state) => {
+      const { openTodoId } = state.modal
+      if (!openTodoId) return null
+      return state.todos.items.find((t) => t.id === openTodoId) ?? null
+    },
+
+    // Aggregation over nested array children
+    subtaskCounts: (state) => {
+      const counts: Record<string, { done: number; total: number }> = {}
+      for (const t of state.todos.items) {
+        if (!t.parentId) continue
+        const entry = counts[t.parentId] ?? (counts[t.parentId] = { done: 0, total: 0 })
+        entry.total++
+        if (t.completed) entry.done++
+      }
+      return counts
+    },
+  })
+```
+
+Components subscribe to these computed values through the root store. Each component only re-renders when the specific computed value it uses actually changes:
+
+```tsx
+function TodoItem({ todo }: { todo: Todo }) {
+  const store = useStore(AppStore)
+  const subtaskCounts = store.use.subtaskCounts()  // shared subscription
+
+  const count = subtaskCounts[todo.id]
+  // Only this component re-renders when subtaskCounts changes
+}
+```
+
+This is more efficient than each component filtering the full items array independently.
+
+## Root delegation
+
+When a child store is nested in a parent, you can send the child's intents through the parent store. The parent automatically delegates the intent to the correct child. This is called **root delegation**.
+
+```tsx
+import { TodoDetailModalIntents } from './stores/todo-detail-modal.store'
+
+function TodoItem({ todo }: { todo: Todo }) {
+  const store = useStore(AppStore)
+
+  const handleOpenDetail = () => {
+    // Send child intent through the root store
+    store.send(TodoDetailModalIntents.open({ todoId: todo.id }))
+  }
+  // ...
+}
+```
+
+Root delegation means components only need access to the root store — they don't need to import or directly access the child store instance. The intent flows through the parent's middleware stack (logging, devtools, persistence) before reaching the child.
+
+## Nesting presentation stores
+
+Not every nested store represents a domain entity. Presentation concerns like modals, command palettes, and panel visibility are often best modeled as `Nested(single)` children of the root store. This gives you:
+
+1. **Cross-store computed** — The modal's state can be combined with domain data in the parent's `.computed()`.
+2. **Root delegation** — Components send modal intents through the root store, ensuring middleware always runs.
+3. **No singleton issues** — The modal store's lifecycle is tied to the root store, not a global singleton.
+
+```ts
+const AppStore = Store({
+  state: {
+    // Domain aggregates
+    todos: Nested(TodoStore),
+    projects: Nested.map(ProjectStore),
+    labels: Nested(LabelStore),
+
+    // Presentation stores
+    todoDetailModal: Nested(TodoDetailModalStore),
+    commandPalette: Nested(CommandPaletteStore),
+    filter: Nested(FilterStore),
+  },
+})
+  .computed({
+    // Cross-store: modal state + domain data
+    openTodo: (state) => {
+      const { openTodoId } = state.todoDetailModal
+      if (!openTodoId) return null
+      return state.todos.items.find((t) => t.id === openTodoId) ?? null
+    },
+  })
+```
+
+This pattern keeps the presentation layer's state management consistent with the domain layer — same event flow, same middleware, same devtools visibility.
+
+## Key points
+
+- **Use `Nested.array` for lists.** Items are keyed by `id`. New array entries create child stores; removed entries dispose them.
+- **Guard child reducers by id.** In `Nested.array`, events are forwarded to all children. Each child must check `if (state.id !== payload.id) return state`.
+- **Events flow both ways.** Parent events forward to children. Child events bubble to parent.
+- **Use `.relay()` for cross-boundary reactions.** Transform child events into parent events when the parent needs to react.
+- **`store.scope` gives direct child access.** Use it in React components for rendering and in executors for delegation.
+- **Each child re-renders independently.** Pass individual child store instances to components for fine-grained updates.

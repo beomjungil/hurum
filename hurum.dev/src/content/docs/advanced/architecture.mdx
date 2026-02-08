@@ -1,0 +1,217 @@
+---
+title: Architecture
+description: "Internal architecture of Hurum: package structure, runtime flow, and extension points."
+---
+
+This page describes how Hurum is built internally. You don't need this information to use Hurum, but it helps when debugging, contributing, or building integrations.
+
+## Package structure
+
+Hurum ships as two packages with a strict dependency direction:
+
+```
+@hurum/react  →  @hurum/core
+  (peer dep)      (zero deps)
+```
+
+### @hurum/core
+
+Framework-agnostic state machine runtime. Zero runtime dependencies. Dual CJS + ESM build.
+
+| Module | Responsibility |
+|--------|---------------|
+| `events.ts` | `Events()` / `Event()` factories, event type branding |
+| `command-executor.ts` | `CommandExecutor()` factory, executor context |
+| `intent.ts` | `Intent()` / `Intents()` / `Intent.all()` / `Intent.allSettled()`, `PreparedIntent` |
+| `store.ts` | `Store()` builder, `createStoreInstance()`, nested management, relay, computed, subscription |
+| `computed.ts` | Proxy-based dependency tracking, structural equality |
+| `nested.ts` | `Nested()` / `Nested.array()` / `Nested.map()` markers |
+| `selector.ts` | `Selector` type and `isSelector` guard |
+| `middleware.ts` | `Middleware` / `MiddlewareFactory` types |
+| `middleware/` | Built-in middleware: `logger`, `persist`, `devtools`, `undoRedo` |
+| `types.ts` | Utility types: `StoreOf`, `StateOf`, `RawStateOf`, `DepsOf`, `DetectConflicts` |
+
+### @hurum/react
+
+Thin React binding layer. Peer depends on React 18+ and `@hurum/core`.
+
+| Module | Responsibility |
+|--------|---------------|
+| `use-store.ts` | `useStore()` hook — context-aware: resolves scoped instance from `StoreProvider` or falls back to singleton |
+| `use-selector.ts` | `useSelector()` — `useSyncExternalStore` with custom selector |
+| `hooks.ts` | Internal `use.*` field hooks via Proxy |
+| `provider.tsx` | `StoreProvider` component + React context |
+| `with-provider.tsx` | `withProvider(def, Component)` HOC |
+| `singleton.ts` | Singleton instance management for fallback |
+
+## Store lifecycle
+
+### 1. Definition (build time)
+
+`Store()` returns a builder. Each chained method (`.on()`, `.intents()`, `.computed()`, `.middleware()`, `.nested()`, `.deps()`) appends configuration to an internal `BuilderConfig`. The builder is immutable — each call returns a new builder instance.
+
+```ts
+const def = Store({ state: { count: 0 } })
+  .on(CounterEvent, { incremented: (s, p) => ({ ...s, count: s.count + p.amount }) })
+  .intents(CounterIntents)
+  .computed({ doubled: (s) => s.count * 2 })
+```
+
+The final `.intents()` or `.computed()` call produces a `StoreDefinition` — a frozen configuration object that can create instances.
+
+### 2. Instantiation (runtime)
+
+`def.create(options?)` calls `createStoreInstance()`, which:
+
+1. **Merges initial state** — `options.initialState` is deep-merged with the default state from the definition.
+2. **Initializes nested stores** — For each `Nested`, `Nested.array`, or `Nested.map` marker in state, creates child `StoreInstance`(s) using the child `StoreDefinition`.
+3. **Resolves nested defaults** — Nested single slots are populated with the child store's initial state (not left as `null`).
+4. **Sets up nested sync** — Subscribes to child stores so that child state changes update the parent's combined state.
+5. **Builds executor index** — Maps each `Command` to its `Executor` for fast lookup during dispatch.
+6. **Initializes middleware** — Calls each `MiddlewareFactory.create()` with the store instance.
+7. **Computes initial computed values** — Runs all computed functions against the initial state.
+
+### 3. Dispatch (runtime)
+
+When `store.send(intent)` is called:
+
+```
+send(intent)
+  ├─ middleware.onIntentStart(intent)
+  ├─ resolve intent → Command[]
+  ├─ for each Command (sequential by default):
+  │   ├─ find Executor for Command
+  │   ├─ executor(command, { deps, emit, getState, signal, scope })
+  │   │   ├─ emit(event)  ← synchronous
+  │   │   │   ├─ middleware.onEvent(event)
+  │   │   │   ├─ store.on[event.type](state, payload) → newState
+  │   │   │   ├─ middleware.onStateChange(prev, next)
+  │   │   │   ├─ processRelay(event, state)
+  │   │   │   │   └─ forwardEventToNestedChildren(relayedEvents)
+  │   │   │   ├─ recompute affected computed values
+  │   │   │   └─ notify subscribers
+  │   │   └─ (next emit...)
+  │   └─ if executor throws → middleware.onError(error)
+  └─ middleware.onIntentEnd(intent)
+```
+
+**Key invariant**: `emit()` is synchronous. State is updated, computed values recalculated, and subscribers notified before `emit()` returns.
+
+### 4. Disposal
+
+`store.dispose()`:
+1. Disposes all nested child stores recursively.
+2. Clears all subscriptions.
+3. Marks the instance as disposed.
+4. Subsequent `send()` calls throw. Subsequent `emit()` calls are silently ignored.
+
+## Nested store internals
+
+Each nested type has a corresponding internal manager:
+
+| Nested type | Manager | Storage |
+|-------------|---------|---------|
+| `Nested(ChildStore)` | `NestedSingleManager` | Single `StoreInstance` |
+| `Nested.array(ChildStore)` | `NestedArrayManager` | `Map<string, StoreInstance>` keyed by item ID |
+| `Nested.map(ChildStore)` | `NestedMapManager` | `Map<string, StoreInstance>` keyed by map key |
+
+### State synchronization
+
+Parent state includes the combined state of all children. When a child's state changes:
+
+1. Child notifies parent via subscription.
+2. Parent calls `recomputeFromNestedChange()`.
+3. Parent's combined state is rebuilt.
+4. Parent's computed values recalculate.
+5. Parent's subscribers are notified.
+
+### Event flow
+
+Events flow in two directions:
+
+**Downward (relay)**: Parent relay handlers can produce events that are forwarded to child stores via `forwardEventToNestedChildren()`. Relay has a depth limit (`MAX_RELAY_DEPTH = 5`) to prevent infinite cycles.
+
+**Upward (bubbling)**: When a child store processes an event, the parent is notified. If the parent has a relay handler for that event type, it can respond.
+
+### Array/Map sync
+
+When raw state changes (e.g., a new item appears in an array), `syncNestedArray()` / `syncNestedMap()` diffs the current instances against the new state:
+- **New keys** → create new child instances
+- **Removed keys** → dispose removed child instances
+- **Existing keys** → leave child instances intact (their state is managed by their own event handlers)
+
+## Computed internals
+
+Computed values use Proxy-based dependency tracking:
+
+1. On first run, a `Proxy` wraps the state object.
+2. The computed function runs against the proxy.
+3. Every property access on the proxy is recorded as a dependency.
+4. On subsequent state changes, only computed functions whose dependencies changed are recalculated.
+
+**Structural equality**: After recalculation, the new value is compared to the previous value using `structuralEqual()`. If they are equal, the previous reference is kept, preventing unnecessary subscriber notifications.
+
+## Middleware pipeline
+
+Middleware receives lifecycle hooks:
+
+```ts
+type Middleware = {
+  onIntentStart?(intent): void
+  onIntentEnd?(intent): void
+  onEvent?(event): void
+  onStateChange?(prev, next): void
+  onError?(error): void
+}
+```
+
+A `MiddlewareFactory` has a `name` and a `create(store)` method that returns a `Middleware`. Built-in factories:
+
+| Factory | Purpose |
+|---------|---------|
+| `logger()` | Logs events, state changes, and errors to console |
+| `persist()` | Persists and rehydrates state (localStorage, custom storage) |
+| `devtools()` | Connects to browser DevTools extensions |
+| `undoRedo()` | Tracks state history for undo/redo |
+
+## React binding internals
+
+### useStore
+
+`useStore(def)` is the primary hook for accessing stores in React components:
+
+1. Checks if a `StoreProvider` for the given definition exists in the component tree via React context.
+2. If found, returns a handle wrapping the scoped instance.
+3. If not found, falls back to the global singleton (created lazily on first access).
+
+The returned `UseStoreReturn` object provides:
+- **`use.*`** — A `Proxy` that creates per-field hooks. `store.use.count()` returns a hook that subscribes to `state.count` via `useSyncExternalStore`.
+- **`send`** — The store instance's send proxy, retaining intent name shortcuts.
+- **`useSelector(fn)`** — Custom selector hook using `useSyncExternalStore`.
+- **`getState`**, **`subscribe`**, **`cancel`**, **`cancelAll`**, **`dispose`**, **`scope`** — Direct access to the underlying store instance methods.
+
+`useStore(instance)` is an overload that wraps a given `StoreInstance` directly, bypassing context resolution.
+
+### StoreProvider
+
+`StoreProvider` accepts a store definition via the `of` prop and optionally an existing `store` instance. If no instance is provided, it auto-creates one using the optional `initialState` and `deps` props. It provides the instance to its children via React context.
+
+### Singleton vs. scoped
+
+- **Singleton** (fallback when no `StoreProvider` is present): A module-level instance created on first access. Client-side only.
+- **Scoped** (`<StoreProvider>` + `useStore()`): Instance-per-provider. Required for SSR, testing, and multi-instance scenarios.
+
+> [!CAUTION]
+> Singletons are not available during SSR. Always use `StoreProvider` + `Store.create()` on the server.
+
+## Extension points
+
+| Extension | Mechanism |
+|-----------|-----------|
+| Custom side effects | Write a `CommandExecutor` |
+| Cross-cutting concerns | Write a `MiddlewareFactory` |
+| Framework bindings | Subscribe to `StoreInstance` via `store.subscribe()` |
+| Custom derived state | Add computed functions in `.computed()` |
+| Inter-store coordination | Use `relay` and `scope` in executors |
+
+Hurum intentionally has no plugin system or hook registry. Every extension is a first-class concept in the architecture.

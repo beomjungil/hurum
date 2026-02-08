@@ -1,0 +1,162 @@
+---
+title: Intent
+description: Intent는 사용자 액션을 실행해야 할 Command에 매핑해요.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 페이지는 [CommandExecutor](/ko/concepts/command-executor/)에 대한 이해를 전제로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Intent는 사용자 액션에서 하나 이상의 Command로의 선언적 매핑이에요. UI에서 호출하는 것 -- Hurum 데이터 흐름의 진입점이에요.
+
+```ts
+import { Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(ValidateCommand, SavePurchaseCommand),
+  pageOpened: Intent(LoadPurchaseCommand),
+  cancelClicked: Intent(CancelCommand),
+})
+
+// Send from your UI
+PurchaseStore.send.submitButtonClicked({ id: '123' })
+```
+
+## 동작 방식
+
+`Intent(Step1, Step2, ...)`는 순차 Intent를 생성해요. 각 step은 `Command`(Executor로 디스패치) 또는 `EventCreator`(직접 emit)일 수 있어요. 트리거되면 step을 순서대로 실행해요. 하나가 throw하면 나머지는 건너뛰어요.
+
+`Intents()`는 `Events()`가 Event를 그룹화하는 것과 비슷하게, 관련된 Intent를 네임스페이스로 그룹화해요. 각 키는 `store.send`의 메서드가 돼요:
+
+```ts
+const CounterIntents = Intents('Counter', {
+  plusClicked: Intent(IncrementCommand),
+  minusClicked: Intent(DecrementCommand),
+  resetClicked: Intent(ResetCommand),
+})
+
+// After registering with a Store:
+CounterStore.send.plusClicked({ amount: 1 })
+CounterStore.send.resetClicked({})
+```
+
+`send`에 전달하는 페이로드는 Intent의 **모든** step에 전달돼요. TypeScript가 컴파일 시점에 페이로드 타입이 모든 step과 호환되는지 확인해요.
+
+### 직접 Event emit
+
+페이로드를 Event에 단순 매핑하는 상태 전환에는 `EventCreator`를 `Intent()`에 직접 전달할 수 있어요 — `CommandExecutor`나 Executor 등록이 필요 없어요:
+
+```ts
+const FormIntents = Intents('ContactForm', {
+  // EventCreator steps — 직접 emit, Executor 불필요
+  nameChanged: Intent(FormEvent.nameChanged),
+  emailChanged: Intent(FormEvent.emailChanged),
+
+  // Command steps — 비동기 로직, deps 접근 등이 필요한 경우
+  submitted: Intent(ValidateFormCommand, SubmitFormCommand),
+})
+```
+
+페이로드가 Event에 1:1로 매핑되는 identity 경우에 `CommandExecutor`의 보일러플레이트를 제거해요. 페이로드를 변환하거나 의존성에 접근해야 하면 `CommandExecutor`를 대신 사용하세요.
+
+### 실행 전략
+
+Hurum은 여러 Command를 실행하기 위한 세 가지 전략을 제공해요:
+
+```ts
+const AppIntents = Intents('App', {
+  // Sequential (default) -- run one after another, stop on first error
+  submit: Intent(ValidateCommand, SaveCommand),
+
+  // Parallel fail-fast -- run all at once, abort others on first error
+  quickSubmit: Intent.all(ValidateCommand, SaveCommand),
+
+  // Parallel independent -- run all at once, each completes regardless
+  initialize: Intent.allSettled(
+    LoadCurrencyCommand,
+    LoadVATCommand,
+    LoadPurchaseCommand,
+  ),
+})
+```
+
+| 전략 | 실행 방식 | 에러 발생 시 |
+|----------|-----------|----------|
+| `Intent(A, B, C)` | A, 그 다음 B, 그 다음 C | 중단. B와 C는 실행되지 않음. |
+| `Intent.all(A, B, C)` | A, B, C 동시 실행 | 나머지를 중단. |
+| `Intent.allSettled(A, B, C)` | A, B, C 동시 실행 | 나머지는 계속 실행. |
+
+> A, B, C는 각각 `Command` 또는 `EventCreator`일 수 있어요. 자유롭게 섞어 사용할 수 있어요.
+
+### 취소
+
+특정 Intent에는 `store.cancel(ref)`을, 모든 것에는 `store.cancelAll()`을 사용해서 수동 취소할 수 있어요:
+
+```ts
+// Cancel a specific intent
+const ref = PurchaseStore.send.submitButtonClicked({ id: '123' })
+PurchaseStore.cancel(ref)
+
+// Cancel all running executors
+PurchaseStore.cancelAll()
+```
+
+Executor가 취소되면 `signal.aborted`가 `true`가 되고, 그 이후에 emit된 Event는 조용히 무시돼요.
+
+## 자주 사용되는 패턴
+
+### 페이지 라이프사이클 Intent
+
+```ts
+const PageIntents = Intents('ProductPage', {
+  // Load everything the page needs
+  opened: Intent.allSettled(
+    LoadProductCommand,
+    LoadReviewsCommand,
+    LoadRecommendationsCommand,
+  ),
+
+  // Clean up on leave
+  closed: Intent(CleanupCommand),
+})
+```
+
+### 폼 제출
+
+```ts
+const FormIntents = Intents('ContactForm', {
+  // Validate first, then submit
+  submitted: Intent(ValidateFormCommand, SubmitFormCommand),
+
+  // Individual field changes — EventCreator step, Executor 불필요
+  fieldChanged: Intent(FormEvent.fieldChanged),
+})
+```
+
+### 수동 취소를 활용한 검색
+
+`store.cancel(ref)`로 새 검색 시작 전에 이전 검색을 취소하세요:
+
+```ts
+const SearchIntents = Intents('Search', {
+  queryChanged: Intent(SearchCommand),
+})
+
+// 새 검색 시작 전에 이전 검색을 취소
+let lastRef: IntentRef | undefined
+function onQueryChange(query: string) {
+  if (lastRef) SearchStore.cancel(lastRef)
+  lastRef = SearchStore.send.queryChanged({ query })
+}
+```
+
+디바운스(실행 전 N ms 대기)가 필요하다면 UI 레이어 또는 Executor 자체에서 처리하세요.
+
+## 팁
+
+- **Intent 이름은 사용자 액션으로 지정하세요.** `plusClicked`, `formSubmitted`, `pageOpened` -- `incrementCounter`나 `saveData`가 아니에요. Intent는 사용자가 한 일을 설명하는 거지, 시스템이 해야 할 일을 설명하는 게 아니에요.
+- **독립적인 로드에는 `Intent.allSettled`를 사용하세요.** 통화, VAT 세율, 구매 데이터를 로드하는 것이 독립적이라면, 하나의 실패가 나머지를 차단하지 않게 하세요.
+- **사용자 액션당 하나의 Intent.** 버튼 클릭이 유효성 검사 후 저장을 해야 한다면, 두 개의 Command를 가진 하나의 Intent이지, 두 개의 Intent가 아니에요.
+- **Intent는 정확히 하나의 Store에 속해요.** Store 빌더에서 `.intents()`로 Intent를 등록해요. 같은 Intent 네임스페이스를 여러 Store에서 공유할 수 없어요.

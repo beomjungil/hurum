@@ -1,0 +1,221 @@
+---
+title: "Dependency Injection"
+description: "Inject repositories, services, and utilities into executors via Store deps."
+---
+
+> [!TIP] Before reading
+> This guide builds on [CommandExecutor](/concepts/command-executor/). Read that first if you haven't.
+
+Executors need external services: API clients, repositories, analytics trackers, clocks. In Hurum, you declare these dependencies as type parameters on the executor, then provide concrete instances when creating the store. This keeps executors pure and testable without mocking frameworks.
+
+## How it works
+
+### Executors declare what they need
+
+The second type parameter of `CommandExecutor` defines the deps shape:
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+interface PurchaseRepository {
+  save(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+  findById(id: string): Promise<Purchase>
+}
+
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit }) => {
+  const result = await deps.purchaseRepository.save(command.purchase)
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+The executor only knows about the interface. It has no idea whether `purchaseRepository` talks to a REST API, a GraphQL endpoint, or an in-memory fake.
+
+### Stores provide concrete instances
+
+The store declares its full deps type with `.deps<T>()`. At creation time, you provide the implementations:
+
+```ts
+import { Store } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .executors(SaveExecutor, LoadExecutor)
+  .deps<{
+    purchaseRepository: PurchaseRepository
+    currencyService: CurrencyService
+  }>()
+```
+
+When you create the store instance:
+
+```ts
+const store = PurchaseStore.create({
+  deps: {
+    purchaseRepository: new HttpPurchaseRepository(),
+    currencyService: new CurrencyService('USD'),
+  },
+})
+```
+
+## Multiple executors, merged deps
+
+When a store has multiple executors with different deps, the store's deps type is the union of everything all executors need:
+
+```ts
+// SaveExecutor needs { purchaseRepository: PurchaseRepository }
+// LoadExecutor needs { purchaseRepository: PurchaseRepository }
+// ConvertExecutor needs { currencyService: CurrencyService }
+
+const PurchaseStore = Store({ state: { ... } })
+  .executors(SaveExecutor, LoadExecutor, ConvertExecutor)
+  .deps<{
+    purchaseRepository: PurchaseRepository
+    currencyService: CurrencyService
+  }>()
+```
+
+Each executor only receives the full deps object at runtime, but it only accesses the keys it declared.
+
+## Testing with swapped deps
+
+The biggest benefit of dependency injection: you can swap implementations in tests without any mocking framework.
+
+```ts
+import { TestStore } from '@hurum/core'
+
+// Create a simple in-memory implementation
+const mockRepo: PurchaseRepository = {
+  async save(purchase) {
+    return Result.ok({ ...purchase, id: 'saved-1' })
+  },
+  async findById(id) {
+    return { id, name: 'Test Purchase', amount: 100 }
+  },
+}
+
+// Pass it directly
+const store = TestStore(PurchaseStore, {
+  deps: {
+    purchaseRepository: mockRepo,
+    currencyService: { convert: (amount) => amount * 1.1 },
+  },
+})
+
+store.send.saveClicked({ purchase: testPurchase })
+await store.waitForIdle()
+
+expect(store.getState().saving).toBe(false)
+expect(store.getState().purchase?.id).toBe('saved-1')
+```
+
+No `jest.mock()`, no `vi.mock()`, no module patching. Just a plain object that satisfies the interface.
+
+## The clock pattern
+
+Time-dependent logic is notoriously hard to test. Inject a clock dependency so you can control time in tests:
+
+```ts
+interface Clock {
+  now(): number
+}
+
+const [TimerCommand, TimerExecutor] = CommandExecutor<
+  {},
+  { clock: Clock }
+>((_, { deps, emit }) => {
+  emit(TimerEvent.ticked({ timestamp: deps.clock.now() }))
+})
+
+// In production
+const store = TimerStore.create({
+  deps: { clock: { now: () => Date.now() } },
+})
+
+// In tests
+let fakeTime = 1000
+const store = TestStore(TimerStore, {
+  deps: { clock: { now: () => fakeTime } },
+})
+
+store.send.tick({})
+expect(store.getState().lastTick).toBe(1000)
+
+fakeTime = 2000
+store.send.tick({})
+expect(store.getState().lastTick).toBe(2000)
+```
+
+This pattern works for any non-deterministic input: random numbers, UUIDs, feature flags, locale settings.
+
+## Nested store deps
+
+When using nested stores, child stores may have their own deps. Use `.childDeps()` to derive child deps from the parent's deps:
+
+```ts
+const ItemStore = Store({
+  state: { id: '', name: '', price: 0 },
+})
+  .executors(UpdateItemExecutor)
+  .deps<{ itemRepository: ItemRepository }>()
+
+const PurchaseStore = Store({
+  state: {
+    items: Nested.array(ItemStore),
+    total: 0,
+  },
+})
+  .executors(SaveExecutor)
+  .deps<{
+    purchaseRepository: PurchaseRepository
+    itemRepository: ItemRepository
+  }>()
+  .childDeps('items', (parentDeps) => ({
+    itemRepository: parentDeps.itemRepository,
+  }))
+```
+
+The `childDeps` mapper runs when child store instances are created. The child gets its own deps derived from the parent, so you only need to provide deps once at the top level.
+
+## Interface-first design
+
+Define deps as interfaces, not concrete classes. This makes swapping trivial:
+
+```ts
+// Good — interface
+interface PurchaseRepository {
+  save(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+}
+
+// Bad — concrete class
+class HttpPurchaseRepository {
+  save(purchase: Purchase): Promise<Result<Purchase, SaveError>> { ... }
+}
+
+// The executor declares the interface, not the implementation
+const [SaveCmd, SaveExec] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }  // interface, not class
+>(...)
+```
+
+This way, `HttpPurchaseRepository`, `GraphQLPurchaseRepository`, and `InMemoryPurchaseRepository` all satisfy the same contract.
+
+## Key points
+
+- **Executors declare deps as their second type parameter.** They access dependencies through `context.deps`.
+- **Stores declare their combined deps type with `.deps<T>()`.** Provide concrete instances via `Store.create({ deps })`.
+- **Tests swap deps directly.** Pass a mock or fake implementation to `TestStore()`. No mocking framework needed.
+- **Use interfaces, not concrete classes.** This keeps your executors decoupled from implementation details.
+- **Inject non-deterministic inputs.** Clocks, random generators, and feature flags should all be deps so tests stay deterministic.
+- **Child store deps flow from parents.** Use `.childDeps()` to derive child deps from the parent's deps object.

@@ -1,0 +1,110 @@
+---
+title: Command / CommandExecutor
+description: "CommandExecutor의 API 레퍼런스예요."
+---
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+```
+
+## `CommandExecutor<TInput, TDeps?, TState?>(executorFn)`
+
+Command/Executor 쌍을 생성해요. Command는 작업을 식별하는 토큰이고, Executor는 Command가 디스패치될 때 실행되는 함수예요.
+
+### 시그니처
+
+```ts
+function CommandExecutor<
+  TInput,
+  TDeps = Record<string, never>,
+  TState = unknown,
+>(fn: ExecutorFn<TInput, TDeps, TState>): [Command<TInput>, Executor<TInput, TDeps, TState>]
+```
+
+### 타입 매개변수
+
+| 매개변수 | 기본값 | 설명 |
+|-----------|---------|-------------|
+| `TInput` | -- | Executor가 받는 페이로드 타입. |
+| `TDeps` | `Record<string, never>` | `context.deps`로 주입되는 의존성. |
+| `TState` | `unknown` | `context.getState()`로 사용 가능한 상태 형태. |
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `fn` | `(command: TInput, context: ExecutorContext) => void \| Promise<void>` | Executor 함수. 첫 번째 인수는 Command 페이로드. 동기 또는 비동기일 수 있어요. |
+
+### 반환값
+
+`[Command<TInput>, Executor<TInput, TDeps, TState>]` 튜플. 두 값을 모두 구조분해하세요:
+
+```ts
+const [SaveCmd, SaveExec] = CommandExecutor<...>(async (command, ctx) => {
+  // ...
+})
+```
+
+### 예제
+
+```ts
+const [SaveCmd, SaveExec] = CommandExecutor<
+  { purchase: Purchase },
+  { repo: PurchaseRepo },
+  { purchase: Purchase | null }
+>(async (command, { deps, emit, getState, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  const result = await deps.repo.save(command.purchase)
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+---
+
+## `ExecutorContext<TDeps, TState>`
+
+모든 Executor 함수의 두 번째 인수로 전달되는 컨텍스트 객체예요.
+
+### 속성
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `deps` | `TDeps` | 주입된 의존성 (API 클라이언트, 레포지토리 등). `Store.create({ deps })`에서 제공돼요. |
+| `emit` | `(event: EventInstance) => void` | Event를 발행해요. Store에 동기적으로 Event를 적용해서 `on` 핸들러를 트리거해요. |
+| `getState` | `() => TState` | Store의 현재 결합된 상태 (raw + computed)를 읽어요. |
+| `signal` | `AbortSignal` | 취소 시그널. `store.cancel(ref)` 또는 `store.cancelAll()` 호출 시 중단돼요. |
+| `scope` | `Record<string, unknown>` | Nested 자식 Store 인스턴스에 대한 접근. 키는 Store 상태에 선언된 Nested 필드 이름과 일치해요. |
+
+### `emit` 참고사항
+
+- `emit`은 동기적이에요. Event가 즉시 적용되며 -- `on` 핸들러가 실행되고, 상태가 업데이트되고, Computed가 재계산되고, 구독자가 호출된 후에 `emit`이 반환돼요.
+- `store.dispose()` 이후의 `emit` 호출은 조용히 무시돼요.
+- Executor는 `emit`을 여러 번 호출할 수 있어요. 각 호출은 독립적인 상태 전환이에요.
+
+### `signal` 참고사항
+
+- `signal`을 `fetch()`, `AbortController` 호환 API에 전달하거나 루프에서 `signal.aborted`를 확인하세요.
+- 취소되면 Executor는 작업을 중단하고 반환해야 해요. 특별한 정리 작업은 필요하지 않아요.
+
+---
+
+## `Command<TInput>`
+
+Command를 식별하는 불투명 브랜드 타입이에요. Command에는 애플리케이션 코드에서 접근 가능한 메서드나 속성이 없어요. Intent를 Executor에 연결하는 토큰 역할을 해요.
+
+---
+
+## `Executor<TInput, TDeps, TState>`
+
+Executor 함수와 연관된 Command를 보유하는 불투명 브랜드 타입이에요. Store 정의 시 `Store.executors()`에 전달해요.
+
+---
+
+## 참고사항
+
+- Command는 명령형이에요 ("이것을 해라"). Event는 선언형이에요 ("이것이 일어났다"). `CommandExecutor`는 이 둘을 연결해요: Command를 받아 Event를 생성해요.
+- 사이드 이펙트당 하나의 `CommandExecutor`. Executor는 집중적으로 유지하세요 -- 하나의 Executor는 하나의 관심사를 처리해야 해요 (예: 서버 저장, 데이터 로딩).
+- 페이로드를 Event에 단순 매핑하는 상태 전환에는 `EventCreator`를 `Intent()`에 직접 전달하세요 -- `CommandExecutor`가 필요 없어요.

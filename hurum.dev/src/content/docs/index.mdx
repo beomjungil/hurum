@@ -1,0 +1,108 @@
+---
+title: Hurum
+description: Predictable state machines for TypeScript applications.
+template: splash
+hero:
+  title: '<img class="light:sl-hidden" src="/wordmark-dark.svg" alt="HURUM" /><img class="dark:sl-hidden" src="/wordmark-light.svg" alt="HURUM" />'
+  tagline: Predictable state machines for TypeScript. Every state change follows one path.
+  image:
+    dark: ../../assets/icon-dark.svg
+    light: ../../assets/icon-light.svg
+    alt: Hurum
+  actions:
+    - text: Get Started
+      link: /getting-started/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/beomjungil/hurum
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Hurum?
+
+<CardGrid stagger>
+  <Card title="Single Path" icon="rocket">
+    Every state change flows through Intent → Command → Executor → Event → Store. No shortcuts, no exceptions.
+  </Card>
+  <Card title="Predictable" icon="approve-check">
+    Events record facts. State transitions are pure functions. You always know what happened and why.
+  </Card>
+  <Card title="TypeScript-First" icon="seti:typescript">
+    Full type inference from executor inputs to event payloads. No manual type annotations needed.
+  </Card>
+  <Card title="Testable at Every Layer" icon="puzzle">
+    Five test utilities target specific layers: TestStore, TestExecutor, TestReducer, TestComputed, TestIntent.
+  </Card>
+</CardGrid>
+
+## The Data Flow
+
+```
+Intent (what the user wants to do)
+  → Command (what to execute)
+    → CommandExecutor (side-effect boundary)
+      → emit(Event) (record what happened)
+        → Store.on (pure state transition)
+          → Computed (derived state, recalculated eagerly)
+            → Subscribers notified
+```
+
+Whether it's a simple counter increment or a complex async API call with error handling, every state change follows this exact path.
+
+## Packages
+
+| Package | Description |
+|---------|-------------|
+| `@hurum/core` | Core state management. Framework-agnostic, zero dependencies. |
+| `@hurum/react` | React bindings: `Provider`, `useStore`, `Store.use.*`, `withProvider`. |
+
+## Quick Example
+
+```ts
+import { Store, Events, Event, CommandExecutor, Intents, Intent } from '@hurum/core'
+
+// 1. Define events (what happened)
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+})
+
+// 2. Define executor (side-effect boundary)
+const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+  { amount: number }
+>((command, { emit }) => {
+  emit(CounterEvent.incremented(command))
+})
+
+// 3. Define intent (what the user wants)
+const CounterIntents = Intents('Counter', {
+  plusClicked: Intent(IncrementCommand),
+})
+
+// 4. Define store (state + transitions + everything)
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, { incremented: (state, { amount }) => ({ ...state, count: state.count + amount }) })
+  .computed({ doubled: (state) => state.count * 2 })
+  .intents(CounterIntents)
+  .executors(IncrementExecutor)
+```
+
+```tsx
+// 5. Use in React
+function Counter() {
+  const count = CounterStore.use.count()
+  const doubled = CounterStore.use.doubled()
+
+  return (
+    <div>
+      <p>{count} (doubled: {doubled})</p>
+      <button onClick={() => CounterStore.send.plusClicked({ amount: 1 })}>+1</button>
+    </div>
+  )
+}
+```
+
+[Get started →](/getting-started/introduction/)

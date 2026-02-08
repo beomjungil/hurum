@@ -1,0 +1,132 @@
+---
+title: Event
+description: Events record facts that happened. They are the only way state changes in Hurum.
+---
+
+Events are immutable records of something that already happened. They are the **only** way state changes in Hurum.
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+// Create a typed event instance
+PurchaseEvent.saved({ purchase })
+// -> { type: 'Purchase/saved', purchase: ... }
+
+// .type gives the string literal type
+PurchaseEvent.saved.type  // 'Purchase/saved' (literal, not string)
+```
+
+## How it works
+
+An event records a fact in past tense: something **saved**, something **incremented**, something **failed**. You never create events directly in your application code. Instead, you call `emit()` inside a [CommandExecutor](/concepts/command-executor/), and the event flows into the [Store](/concepts/store/) where `.on` handlers transition state.
+
+The `Events()` factory takes a namespace prefix and a map of event creators:
+
+```ts
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+  decremented: Event<{ amount: number }>(),
+  reset: Event(),  // no payload
+})
+```
+
+Each key becomes an event creator function. Calling it produces a plain object with a `type` string and the payload fields spread in:
+
+```ts
+CounterEvent.incremented({ amount: 5 })
+// -> { type: 'Counter/incremented', amount: 5 }
+
+CounterEvent.reset()
+// -> { type: 'Counter/reset' }
+```
+
+### The `.type` property
+
+Every event creator has a `.type` property that holds the string literal type (e.g., `'Counter/incremented'`). This is used internally for dispatch, but you rarely need to reference it directly.
+
+In Store `.on` handlers, you use the **namespace form** or **per-event form** — both infer payload types automatically:
+
+```ts
+// Namespace form -- pass the event namespace and a handler map
+const MyStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({
+      ...state,
+      count: state.count + amount,
+    }),
+    reset: () => ({
+      count: 0,
+    }),
+  })
+
+// Per-event form -- one event creator and one handler
+const MyStore2 = Store({ state: { count: 0 } })
+  .on(CounterEvent.incremented, (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }))
+  .on(CounterEvent.reset, () => ({
+    count: 0,
+  }))
+```
+
+In the namespace form, each key in the handler map corresponds to a key in the event namespace. TypeScript infers the payload type for each handler automatically — `{ amount }` is correctly typed as `{ amount: number }`.
+
+## Common patterns
+
+### Grouping related events
+
+One `Events()` call per domain concept keeps things organized:
+
+```ts
+// One group per domain concept
+const CartEvent = Events('Cart', {
+  itemAdded: Event<{ item: CartItem }>(),
+  itemRemoved: Event<{ itemId: string }>(),
+  cleared: Event(),
+})
+
+const CheckoutEvent = Events('Checkout', {
+  started: Event<{ cartId: string }>(),
+  completed: Event<{ orderId: string }>(),
+  failed: Event<{ error: CheckoutError }>(),
+})
+```
+
+### Request/success/failure triples
+
+Async operations often produce three events:
+
+```ts
+const UserEvent = Events('User', {
+  loadRequested: Event<{ userId: string }>(),
+  loaded: Event<{ user: User }>(),
+  loadFailed: Event<{ error: Error }>(),
+})
+```
+
+The executor emits `loadRequested` immediately, then either `loaded` or `loadFailed` after the async call resolves.
+
+### Events without payloads
+
+When the fact itself is all you need:
+
+```ts
+const SessionEvent = Events('Session', {
+  started: Event(),
+  ended: Event(),
+})
+```
+
+## Tips
+
+- **Name events in past tense.** Events record what happened, not what should happen. `saved` not `save`, `incremented` not `increment`.
+- **Events are independent.** Define them before commands, intents, or stores. They have no dependencies on anything else.
+- **Keep payloads minimal.** Include only the data needed for state transitions. The store can derive the rest.
+- **One `Events()` per concept.** Don't put cart events and user events in the same group. Separate namespaces make it clear where each event belongs.

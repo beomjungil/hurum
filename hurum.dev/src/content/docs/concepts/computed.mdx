@@ -1,0 +1,164 @@
+---
+title: Computed
+description: Computed values are derived state that automatically recalculates when dependencies change.
+---
+
+> [!TIP] Before reading
+> This page assumes familiarity with [Store](/concepts/store/). Read that first if you haven't.
+
+Computed values are derived state. They are part of the store's state graph, recalculated automatically whenever their dependencies change.
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as Error | null,
+  },
+})
+  .computed({
+    totalAmount: (state) =>
+      state.purchase?.items.reduce((sum, item) => sum + item.amount, 0) ?? 0,
+
+    isValid: (state) =>
+      state.purchase !== null && state.error === null,
+
+    // Computed can depend on other computed values
+    canSubmit: (state) =>
+      state.purchase !== null && state.error === null && !state.saving,
+  })
+```
+
+## How it works
+
+You define computed values with `.computed()` in the Store builder chain. Each key maps to a function that takes the current state (including other computed values) and returns a derived value.
+
+```ts
+.computed({
+  fullName: (state) => `${state.firstName} ${state.lastName}`,
+  isLongName: (state) => state.fullName.length > 20,
+})
+```
+
+### Proxy-based dependency tracking
+
+Hurum uses a Proxy to track which state fields each computed function accesses during execution. If a computed function reads `state.purchase` and `state.items`, it will only recalculate when those two fields change -- not when `state.saving` changes.
+
+This happens automatically. You don't declare dependencies manually.
+
+### Eager recalculation
+
+Computed values recalculate **immediately** when their tracked dependencies change, not when they are read. This means:
+
+- After an event handler updates state, all affected computed values are already up to date
+- `getState()` always returns the latest computed values
+- Subscribers are notified with fully resolved state (raw + computed)
+
+```ts
+// After emitting PurchaseEvent.saved:
+// 1. .on handler updates state.purchase
+// 2. totalAmount, isValid, canSubmit recalculate immediately
+// 3. Subscribers see the fully updated state
+```
+
+### Reference stability
+
+If a computed function returns a value that is structurally equal to the previous result, Hurum keeps the old reference. This prevents unnecessary re-renders in React:
+
+```ts
+.computed({
+  // If the items array hasn't changed, the same reference is returned
+  activeItems: (state) =>
+    state.items.filter((item) => item.status === 'active'),
+})
+```
+
+Structural equality means deep comparison of the value. If the new array has the same elements in the same order, the old array reference is kept.
+
+### Computed depending on computed
+
+Computed values can read other computed values from the same `state` object:
+
+```ts
+.computed({
+  subtotal: (state) =>
+    state.items.reduce((sum, item) => sum + item.price * item.quantity, 0),
+
+  tax: (state) =>
+    state.subtotal * state.taxRate,
+
+  total: (state) =>
+    state.subtotal + state.tax,
+})
+```
+
+Hurum performs a **topological sort** at store creation time to determine the correct evaluation order. If `total` depends on `subtotal` and `tax`, Hurum ensures `subtotal` and `tax` are computed first.
+
+Circular dependencies are detected at creation time and throw an error.
+
+## Common patterns
+
+### Boolean flags
+
+```ts
+.computed({
+  isEmpty: (state) => state.items.length === 0,
+  hasError: (state) => state.error !== null,
+  isReady: (state) => !state.loading && state.data !== null,
+})
+```
+
+### Filtered or transformed collections
+
+```ts
+.computed({
+  completedTodos: (state) =>
+    state.todos.filter((todo) => todo.completed),
+
+  todoCount: (state) => ({
+    total: state.todos.length,
+    completed: state.todos.filter((t) => t.completed).length,
+    remaining: state.todos.filter((t) => !t.completed).length,
+  }),
+})
+```
+
+### Formatted display values
+
+```ts
+.computed({
+  displayPrice: (state) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: state.currency,
+    }).format(state.price),
+
+  lastUpdatedText: (state) =>
+    state.lastUpdated
+      ? new Intl.RelativeTimeFormat('en').format(
+          Math.round((state.lastUpdated - Date.now()) / 60000),
+          'minute',
+        )
+      : 'Never',
+})
+```
+
+## Tradeoffs
+
+Eager recalculation has a cost: deep computed chains recalculate on every state change that touches their dependencies. For most applications, this is negligible. But if you have many chained computed values that all depend on frequently-changing state, the cost adds up.
+
+Compared to alternatives:
+- **Zustand selectors** run every selector on every state change. Hurum only recalculates the ones whose tracked dependencies changed.
+- **Reselect memoization** requires manual dependency declaration. Hurum tracks dependencies automatically.
+- **MobX computed** uses the same proxy-based tracking. The tradeoff is similar.
+
+If a computed chain becomes a performance concern, consider:
+- Moving expensive computation into the event handler (compute once on write, not on every read)
+- Breaking a deep chain into fewer, more direct computations
+
+## Tips
+
+- **Keep computed functions pure.** No side effects, no async, no mutations. They are pure derivations of state.
+- **Prefer many small computed values over few large ones.** `isValid`, `canSubmit`, and `hasError` are better as three separate computed values than one `formStatus` object. Smaller computations mean more targeted recalculation and better React render performance.
+- **Don't duplicate raw state.** If `state.name` already exists, don't create a computed `name: (state) => state.name`. Access raw state directly.
+- **Watch for conditional access.** If your computed function reads `state.user?.name`, the proxy only tracks `state.user`. If `user` is `null`, `name` is never accessed and not tracked. This is usually fine, but be aware of it.

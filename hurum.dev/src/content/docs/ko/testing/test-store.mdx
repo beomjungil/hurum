@@ -1,0 +1,205 @@
+---
+title: "TestStore"
+description: "Intent에서 최종 상태까지 전체 Store 흐름을 통합 테스트해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`TestStore`는 `Store.create()`를 assertion과 마이크로태스크를 플러시하는 비동기 `send()`로 감싸요. 통합 테스트의 주요 유틸리티로 -- Intent를 보내고, Event가 emit되었는지 확인하고, 상태가 올바른지 검증해요.
+
+## 설정
+
+```ts
+import { TestStore } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseIntents } from './intents'
+import { PurchaseEvent } from './events'
+
+const mockRepo = {
+  save: vi.fn().mockResolvedValue(savedPurchase),
+}
+
+const store = TestStore(PurchaseStore, {
+  initialState: { purchase: mockPurchase },
+  deps: { repository: mockRepo },
+})
+```
+
+`TestStore`는 `Store.create()`와 동일한 옵션을 받아요:
+
+| 옵션 | 타입 | 설명 |
+|--------|------|-------------|
+| `initialState` | `Partial<RawState>` | Store 기본값과 딥 머지 |
+| `deps` | `Partial<Deps>` | Store 기본값과 얕은 머지 |
+
+## send (비동기)
+
+`send()`는 Intent를 디스패치하고 모든 비동기 Executor가 완료될 때까지 기다린 후 해결돼요. 이것이 일반 `store.send()`와의 핵심 차이점이에요 -- `await`한 다음 assert할 수 있어요.
+
+```ts
+// Named shorthand
+await store.send.submitClicked({ purchase: mockPurchase })
+
+// PreparedIntent
+await store.send(PurchaseIntents.submitClicked({ purchase: mockPurchase }))
+
+// Descriptor + payload
+await store.send(PurchaseIntents.submitClicked, { purchase: mockPurchase })
+```
+
+세 가지 형태 모두 동일해요. 이름 단축키가 가장 간결해요.
+
+## Assertion
+
+### assertState
+
+특정 상태 필드가 예상 값과 일치하는지 확인해요. 구조적 동등성을 사용해요 -- 확인할 필드만 제공하면 돼요.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertState({
+  saving: false,
+  purchase: savedPurchase,
+})
+// Only checks `saving` and `purchase`. Other fields are ignored.
+```
+
+필드가 일치하지 않으면, 에러 메시지에 예상 값과 실제 값이 표시돼요:
+
+```
+State mismatch for key "saving":
+  Expected: false
+  Received: true
+```
+
+### assertEvents
+
+emit된 Event의 정확한 목록을 순서대로 검증해요.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertEvents([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+Event 타입과 페이로드 모두 확인해요. 순서가 중요해요 -- Event가 표시된 정확한 순서로 나타나야 해요.
+
+### assertEventSequence
+
+각 Event 이후의 상태 스냅샷과 쌍을 이루는 Event를 확인해요. 가장 강력한 assertion으로 -- 흐름 전체에서 중간 상태가 올바른지 검증해요.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+
+store.assertEventSequence([
+  {
+    event: PurchaseEvent.saveRequested({ id: '123' }),
+    state: { saving: true, error: null },
+  },
+  {
+    event: PurchaseEvent.saved({ purchase: savedPurchase }),
+    state: { saving: false, purchase: savedPurchase },
+  },
+])
+```
+
+각 항목은 독립적으로 매칭돼요 -- Event 시퀀스의 부분집합을 확인할 수 있어요. `state` 필드는 `assertState`처럼 부분 매칭이에요.
+
+### assertNoRunningExecutors
+
+모든 Executor가 완료되었는지 확인해요. 테스트 끝에 아직 보류 중인 비동기 작업이 없는지 확인하는 데 유용해요.
+
+```ts
+await store.send.submitClicked({ purchase: mockPurchase })
+store.assertNoRunningExecutors()
+```
+
+Executor가 아직 실행 중이면:
+
+```
+Expected no running executors, but 2 are still running
+```
+
+## 기타 메서드
+
+### getState
+
+전체 현재 상태 (원시 + Computed) 읽기:
+
+```ts
+const state = store.getState()
+expect(state.purchase?.name).toBe('Test')
+expect(state.totalAmount).toBe(300)  // computed
+```
+
+### scope
+
+Nested 자식 Store 인스턴스 접근:
+
+```ts
+const childStore = store.scope.items
+// Interact with nested stores for complex scenarios
+```
+
+## 전체 예시
+
+```ts title="purchase-store.test.ts"
+import { describe, it, expect, vi } from 'vitest'
+import { TestStore } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseIntents } from './intents'
+import { PurchaseEvent } from './events'
+
+describe('PurchaseStore', () => {
+  const mockPurchase = { id: '123', name: 'Widget', items: [{ amount: 100 }] }
+
+  it('saves a purchase', async () => {
+    const savedPurchase = { ...mockPurchase, savedAt: '2026-01-01' }
+    const mockRepo = { save: vi.fn().mockResolvedValue(savedPurchase) }
+
+    const store = TestStore(PurchaseStore, {
+      initialState: { purchase: mockPurchase },
+      deps: { repository: mockRepo },
+    })
+
+    await store.send.submitClicked({ purchase: mockPurchase })
+
+    store.assertEventSequence([
+      {
+        event: PurchaseEvent.saveRequested({ id: '123' }),
+        state: { saving: true },
+      },
+      {
+        event: PurchaseEvent.saved({ purchase: savedPurchase }),
+        state: { saving: false, purchase: savedPurchase },
+      },
+    ])
+    store.assertNoRunningExecutors()
+  })
+
+  it('handles save failure', async () => {
+    const mockRepo = { save: vi.fn().mockRejectedValue(new Error('Network error')) }
+
+    const store = TestStore(PurchaseStore, {
+      deps: { repository: mockRepo },
+    })
+
+    await store.send.submitClicked({ purchase: mockPurchase })
+
+    store.assertState({ saving: false, error: 'Network error' })
+  })
+})
+```
+
+<Aside type="tip">
+  `TestStore.send()`는 내부적으로 여러 라운드의 마이크로태스크를 플러시해요. 수동으로 `setTimeout`이나 `flushPromises` 호출을 추가할 필요 없어요 -- 그냥 `await store.send(...)`하고 assert하면 돼요.
+</Aside>
+
+## 다음 단계
+
+- [TestExecutor](/ko/testing/test-executor/) -- 격리된 Executor 단위 테스트
+- [TestReducer](/ko/testing/test-reducer/) -- 개별 on() 핸들러 테스트

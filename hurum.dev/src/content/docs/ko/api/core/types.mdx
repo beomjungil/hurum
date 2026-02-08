@@ -1,0 +1,147 @@
+---
+title: 유틸리티 타입
+description: "타입 헬퍼 API 레퍼런스: StoreOf, StateOf, RawStateOf, DepsOf."
+---
+
+```ts
+import type { StoreOf, StateOf, RawStateOf, DepsOf, DetectConflicts } from '@hurum/core'
+```
+
+Store 정의에서 타입을 추출하기 위한 타입 유틸리티예요. 타입을 중복 정의하지 않고 Store 타입을 참조해야 하는 함수, 훅, 테스트를 작성할 때 유용해요.
+
+## `StoreOf<T>`
+
+Store 정의에서 Store 인스턴스 타입을 추출해요.
+
+```ts
+type StoreOf<T> = T extends StoreDefinition<infer D, infer R, infer C, infer I>
+  ? StoreInstance<D, R, C, I>
+  : never
+```
+
+### 예제
+
+```ts
+const CartStore = Store({ state: { items: [] as CartItem[] } })
+  .computed({ total: (s) => s.items.reduce((sum, i) => sum + i.price, 0) })
+  .intents(CartIntents)
+  .executors(AddItemExec)
+
+// Extract the instance type
+type CartInstance = StoreOf<typeof CartStore>
+
+function processCart(store: CartInstance) {
+  const state = store.getState()
+  //    ^? { items: CartItem[], total: number }
+}
+```
+
+---
+
+## `StateOf<T>`
+
+Store 정의에서 결합된 상태 타입 (raw + Computed)을 추출해요. `store.getState()`가 반환하는 타입이에요.
+
+```ts
+type StateOf<T> = T extends StoreDefinition<unknown, infer R, infer C>
+  ? ResolvedState<R> & C
+  : never
+```
+
+### 예제
+
+```ts
+type CartState = StateOf<typeof CartStore>
+// { items: CartItem[], total: number }
+
+function renderTotal(state: CartState) {
+  return `$${state.total.toFixed(2)}`
+}
+```
+
+---
+
+## `RawStateOf<T>`
+
+Store 정의에서 raw 상태 타입만 추출해요 (Computed 필드 제외). `on` 핸들러가 반환해야 하는 형태예요.
+
+```ts
+type RawStateOf<T> = T extends StoreDefinition<unknown, infer R, unknown>
+  ? R
+  : never
+```
+
+### 예제
+
+```ts
+type CartRawState = RawStateOf<typeof CartStore>
+// { items: CartItem[] }
+// Note: `total` is NOT included (it's computed)
+```
+
+---
+
+## `DepsOf<T>`
+
+Store 정의에서 의존성 타입을 추출해요.
+
+```ts
+type DepsOf<T> = T extends StoreDefinition<infer D, unknown, unknown>
+  ? D
+  : never
+```
+
+### 예제
+
+```ts
+const CartStore = Store({ state: { items: [] as CartItem[] } })
+  .deps<{ repo: CartRepo; analytics: Analytics }>()
+
+type CartDeps = DepsOf<typeof CartStore>
+// { repo: CartRepo; analytics: Analytics }
+
+function createTestDeps(): CartDeps {
+  return {
+    repo: new MockCartRepo(),
+    analytics: new MockAnalytics(),
+  }
+}
+```
+
+---
+
+## `DetectConflicts<A, B>`
+
+두 의존성 타입 간 충돌하는 키를 감지해요. `A`와 `B` 모두에 동일한 키가 다른 타입으로 존재하면, 충돌하는 키 이름의 유니언으로 나타나요.
+
+```ts
+type DetectConflicts<A, B> = {
+  [K in keyof A & keyof B]: A[K] extends B[K]
+    ? B[K] extends A[K]
+      ? never
+      : K
+    : K
+}[keyof A & keyof B]
+```
+
+### 예제
+
+```ts
+type ParentDeps = { api: RestApi; logger: Logger }
+type ChildDeps = { api: GraphQLApi; cache: Cache }
+
+type Conflicts = DetectConflicts<ParentDeps, ChildDeps>
+// 'api' -- because RestApi !== GraphQLApi
+
+// Use this to catch mismatches early:
+type AssertNoConflicts = [Conflicts] extends [never] ? true : false
+//   ^? false -- there IS a conflict
+```
+
+---
+
+## 참고사항
+
+- 이 타입들은 Store 정의 (빌더)에서 작동해요. Store 인스턴스가 아닌 `typeof MyStore`를 전달하세요.
+- `StateOf`는 해석된 Nested 상태를 포함해요. `Nested(ChildStore)` 필드는 자식의 전체 상태 (raw + Computed)로 해석돼요.
+- 모든 유틸리티 타입은 입력이 유효한 `StoreDefinition`이 아니면 `never`를 반환해요.

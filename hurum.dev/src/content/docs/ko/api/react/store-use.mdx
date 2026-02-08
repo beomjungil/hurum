@@ -1,0 +1,138 @@
+---
+title: "useStore().use.*"
+description: "useStore()를 통한 필드별 구독 훅의 API 레퍼런스예요."
+---
+
+```tsx
+import { useStore } from '@hurum/react'
+```
+
+## `useStore(def).use.fieldName()`
+
+`useStore()` 반환값을 통해 접근하는 필드별 구독 훅이에요. 상태 필드 (raw, Computed, 해석된 Nested)마다 하나의 훅이 제공돼요.
+
+### 설정
+
+```ts
+import { Store } from '@hurum/core'
+
+const CartStore = Store({ state: { items: [] as CartItem[], taxRate: 0.1 } })
+  .computed({ total: (s) => s.items.reduce((sum, i) => sum + i.price, 0) })
+  .intents(CartIntents)
+  .executors(AddItemExec)
+
+// 컴포넌트에서:
+// const cart = useStore(CartStore)
+// cart.use.items, cart.use.taxRate, cart.use.total 사용 가능
+```
+
+### 시그니처
+
+```ts
+const store = useStore(StoreDef)
+store.use.fieldName(): FieldType
+```
+
+`store.use`의 각 속성은 React 훅 함수예요. 호출하면 컴포넌트가 해당 특정 필드를 구독해요.
+
+### 예제
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  return <span>{items.length}</span>
+}
+
+function CartTotal() {
+  const cart = useStore(CartStore)
+  const total = cart.use.total()
+  return <span>${total.toFixed(2)}</span>
+}
+```
+
+---
+
+## `useStore(def).useSelector(fn)`
+
+파생 상태 훅이에요. 해석된 Store 인스턴스 (스코프 또는 싱글턴)에서 읽어요.
+
+### 시그니처
+
+```ts
+const store = useStore(StoreDef)
+store.useSelector<T>(fn: (state: State) => T): T
+store.useSelector<T>(selector: Selector<T>): T
+```
+
+### 예제
+
+```tsx
+function ExpensiveItems() {
+  const cart = useStore(CartStore)
+  const expensive = cart.useSelector(
+    (state) => state.items.filter((i) => i.price > 100)
+  )
+  return <ul>{expensive.map((i) => <li key={i.id}>{i.name}</li>)}</ul>
+}
+```
+
+---
+
+## `useStore(def).send`
+
+해석된 Store 인스턴스의 send 프록시예요. Intent를 디스패치해요.
+
+### 예제
+
+```tsx
+function AddButton({ item }: { item: CartItem }) {
+  const cart = useStore(CartStore)
+  return (
+    <button onClick={() => cart.send.addItem({ item })}>
+      Add to Cart
+    </button>
+  )
+}
+```
+
+---
+
+## 해석 동작
+
+`useStore()` 반환값의 훅은 컨텍스트를 인식해요:
+
+- **`StoreProvider` 내부**: 가장 가까운 매칭 Provider의 스코프된 인스턴스에서 읽어요.
+- **`StoreProvider` 외부**: 글로벌 싱글턴 인스턴스로 폴백해요 (첫 접근 시 지연 생성).
+
+### 컨텍스트 인식 비교
+
+| API | 읽기 대상 | 사용 사례 |
+|-----|------------|----------|
+| `useStore(CartStore).use.items()` | 가장 가까운 StoreProvider 또는 싱글턴 | 스코프 인스턴스, SSR, 테스팅, 일반 사용 |
+
+### 사용 시기
+
+- 컴포넌트가 다른 인스턴스를 가진 StoreProvider 내부에서 실행될 수 있을 때.
+- SSR 지원이 필요할 때 (싱글턴은 클라이언트 전용).
+- 격리된 Store 인스턴스로 테스트 가능성이 필요할 때.
+- 컨텍스트 인식 해석이 필요할 때 (권장 기본값).
+
+---
+
+## 작동 방식
+
+각 `store.use.fieldName` 훅은 내부적으로 `useSyncExternalStore`를 사용해요:
+1. Store 인스턴스를 해석해요 (컨텍스트 또는 싱글턴에서).
+2. Store의 상태 변경을 구독해요.
+3. 스냅샷 함수가 `store.getState()`에서 특정 필드만 읽어요.
+
+이는 컴포넌트가 구독한 필드가 실제로 변경될 때만 리렌더링되며, 모든 상태 업데이트에 리렌더링되지 않는다는 뜻이에요.
+
+---
+
+## 참고사항
+
+- 훅은 훅의 규칙을 따라요. 조건부로 호출하지 마세요.
+- 훅은 필드 이름별로 캐시돼요. `store.use.items`에 여러 번 접근해도 동일한 훅 함수를 반환해요.
+- StoreProvider 외부에서는 싱글턴이 첫 접근 시 생성돼요. 서버에서는 싱글턴이 클라이언트 전용이므로 개발 경고가 기록돼요. SSR에는 `StoreProvider` + `Store.create()`를 사용하세요.

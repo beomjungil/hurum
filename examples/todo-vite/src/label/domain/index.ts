@@ -1,0 +1,5 @@
+export { LabelStore } from './label.store'
+export { LabelEvent } from './events/label.events'
+export { LabelIntents } from './intents/label.intents'
+export type { Label } from './entities/label'
+export type { LabelRepository } from './repository/label.repository'

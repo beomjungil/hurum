@@ -1,0 +1,133 @@
+---
+title: StoreProvider
+description: "API reference for the StoreProvider component."
+---
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+```
+
+## `StoreProvider`
+
+A React context provider that supplies a scoped store instance to the component tree. When `useStore()` is called inside a `StoreProvider`, it returns the provided instance instead of the global singleton.
+
+### Props
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `of` | `StoreDefinition` | The store definition to provide for. |
+| `store` | `StoreInstance` | _(optional)_ An existing store instance to provide. If omitted, one is auto-created. |
+| `initialState` | `Partial<State>` | _(optional)_ Initial state override when auto-creating. Ignored if `store` is provided. |
+| `deps` | `Deps` | _(optional)_ Dependencies when auto-creating. Ignored if `store` is provided. |
+| `children` | `ReactNode` | Child component tree. |
+
+### Import
+
+```ts
+import { StoreProvider } from '@hurum/react'
+```
+
+### Example — providing an existing instance
+
+```tsx
+function App() {
+  const store = useMemo(() => CartStore.create({
+    deps: { repo: new CartRepo() },
+  }), [])
+
+  return (
+    <StoreProvider of={CartStore} store={store}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+
+function CartPage() {
+  // This reads from the scoped instance, not the singleton
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  // ...
+}
+```
+
+### Example — auto-creating with defaults
+
+```tsx
+function App() {
+  return (
+    <StoreProvider of={CartStore}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+### Example — auto-creating with options
+
+```tsx
+function App() {
+  return (
+    <StoreProvider of={CartStore} initialState={{ items: savedItems }} deps={{ repo: new CartRepo() }}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+---
+
+## Lifecycle
+
+**StoreProvider does NOT auto-dispose the store on unmount.** This is intentional for React Strict Mode compatibility. In development, Strict Mode mounts, unmounts, and remounts components. Auto-disposing on the first unmount would break the store.
+
+Manage disposal yourself:
+
+```tsx
+function App() {
+  const store = useMemo(() => CartStore.create(), [])
+
+  useEffect(() => {
+    return () => store.dispose()
+  }, [store])
+
+  return (
+    <StoreProvider of={CartStore} store={store}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+---
+
+## Multiple Providers
+
+You can nest multiple providers for different stores, or the same store with different instances:
+
+```tsx
+function App() {
+  const mainCart = useMemo(() => CartStore.create(), [])
+  const savedCart = useMemo(() => CartStore.create({
+    initialState: { items: savedItems },
+  }), [])
+
+  return (
+    <StoreProvider of={CartStore} store={mainCart}>
+      <MainPage />
+      <StoreProvider of={CartStore} store={savedCart}>
+        <SavedCartSidebar />
+      </StoreProvider>
+    </StoreProvider>
+  )
+}
+```
+
+The nearest `StoreProvider` wins. `SavedCartSidebar` reads from `savedCart`, while `MainPage` reads from `mainCart`.
+
+---
+
+## Notes
+
+- `StoreProvider` uses React context under the hood. Each `StoreDefinition` gets its own context, so providers for different stores do not interfere.
+- When providing an existing store instance via `store`, it must be created before rendering. Use `useMemo` or `useState` to avoid creating a new instance on every render.
+- For simple cases where you always want a fresh store instance, use [`withProvider`](/api/react/with-provider/) instead.

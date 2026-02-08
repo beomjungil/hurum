@@ -1,0 +1,157 @@
+---
+title: "싱글턴 폴백"
+description: "useStore(Def)를 Provider 외부에서 호출해서 전역 싱글턴으로 사용하는 방법이에요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## 싱글턴 폴백이란
+
+모든 Store가 Provider를 필요로 하는 건 아니에요. 인증 상태, 테마 설정, 피처 플래그 등은 진정한 의미의 전역 상태예요. 앱당 하나의 인스턴스만 존재하고, 모든 컴포넌트가 이를 읽어요.
+
+이런 Store의 경우, Provider 패턴은 불필요한 의례적 코드를 추가할 뿐이에요. 인스턴스를 생성하고, 앱 전체를 감싸고, context를 통해 전달하는 과정을 거쳐도 결국 싱글턴과 동일한 동작을 하게 돼요.
+
+`useStore(Def)`를 `StoreProvider` 외부에서 호출하면, 자동으로 전역 싱글턴 인스턴스로 폴백해요. 별도의 래핑이나 설정이 필요 없어요:
+
+```tsx
+import { useStore } from '@hurum/react'
+import { AuthStore } from './store'
+
+function UserMenu() {
+  const store = useStore(AuthStore)
+  const user = store.use.currentUser()
+  const loggedIn = store.use.isLoggedIn()  // computed
+
+  if (!loggedIn) return <LoginButton />
+  return <span>Hello, {user.name}</span>
+}
+```
+
+Provider도, 설정도, 보일러플레이트도 필요 없어요.
+
+## 동작 방식
+
+### store.use.*
+
+`useStore(Def)`가 반환한 핸들의 `use` proxy에서 모든 필드(computed 값 포함)를 hook으로 접근해요:
+
+```tsx
+function CounterDisplay() {
+  const store = useStore(CounterStore)
+  const count = store.use.count()           // raw state
+  const doubled = store.use.doubled()       // computed
+  return <p>{count} (doubled: {doubled})</p>
+}
+```
+
+각 hook은 해당 필드에 대한 `useSyncExternalStore` 구독을 생성해요. `count`가 변경되어도 `multiplier`가 동일하면, `count`를 읽는 컴포넌트만 리렌더링돼요.
+
+### store.useSelector
+
+여러 필드를 결합한 파생 상태가 필요한 경우:
+
+```tsx
+function CounterSummary() {
+  const store = useStore(CounterStore)
+  const summary = store.useSelector((state) => ({
+    count: state.count,
+    product: state.product,
+  }))
+  return <p>{summary.count} x {summary.product}</p>
+}
+```
+
+selector는 모든 상태 변경 시 실행되지만, 반환 값이 이전 값과 구조적으로 다를 때만 컴포넌트가 리렌더링돼요.
+
+### store.send
+
+싱글턴에 Intent를 디스패치해요:
+
+```tsx
+function CounterControls() {
+  const store = useStore(CounterStore)
+
+  return (
+    <button onClick={() => store.send.plusClicked({ amount: 1 })}>
+      +1
+    </button>
+  )
+}
+```
+
+`store.send`는 이름 기반 단축 문법과 직접 Intent 디스패치를 모두 지원해요:
+
+```tsx
+store.send.plusClicked({ amount: 1 })
+store.send(CounterIntents.plusClicked({ amount: 1 }))
+store.send(CounterIntents.plusClicked, { amount: 1 })
+```
+
+세 가지 모두 동일해요.
+
+## 싱글턴이 생성되는 시점
+
+전역 싱글턴은 **지연 생성**돼요 — 첫 번째 `useStore(Def)` hook이 Provider 외부에서 호출될 때 생성돼요. 명시적으로 초기화할 필요가 없어요.
+
+<Aside type="caution">
+  **서버에서 싱글턴에 접근하지 마세요.** 싱글턴은 서버 환경에서 요청 간에 지속되어 사용자 간 상태 누수를 발생시켜요. SSR의 경우 [StoreProvider + Store.create()](/ko/react/provider/)를 사용하세요. Hurum은 SSR 중 싱글턴 접근 시 개발 모드 경고를 출력해요.
+</Aside>
+
+## Provider로 전환해야 하는 경우
+
+다음과 같은 경우 싱글턴 폴백은 적합하지 않아요:
+
+- **여러 인스턴스가 필요한 경우.** 세 개의 차트 위젯이 있는 대시보드, 나란히 있는 두 개의 구매 폼, 각 항목이 자체 Store를 가지는 리스트 — 싱글턴은 하나의 인스턴스만 제공하지만, 여러 개가 필요해요.
+- **초기 상태에 서버 데이터가 필요한 경우.** `Store.create({ initialState })`를 사용하면 서버 데이터를 주입할 수 있어요. 싱글턴은 기본 상태로만 시작해요.
+- **범위가 지정된 의존성이 필요한 경우.** 서로 다른 인스턴스가 다른 `deps`를 필요로 할 수 있어요(예: 하나는 실제 API 클라이언트, 다른 하나는 mock).
+- **서버에서 렌더링하는 경우.** 서버에서는 전역 상태가 없어요. 절대로.
+
+이 중 하나라도 해당되면 [StoreProvider + useStore()](/ko/react/provider/)로 전환하세요.
+
+<Aside type="tip">
+  동일한 컴포넌트가 두 context에서 모두 작동해요. `useStore(Def)`는 `StoreProvider` 내부에서는 스코프 인스턴스를, 외부에서는 싱글턴을 자동으로 반환해요. 코드 변경 없이 나중에 Provider를 추가할 수 있어요.
+</Aside>
+
+## 전체 예제
+
+```tsx title="app.tsx"
+import { useStore } from '@hurum/react'
+import { TodoStore } from './store'
+
+function TodoList() {
+  const store = useStore(TodoStore)
+  const todos = store.use.todos()
+  const filter = store.use.filter()
+  const filteredTodos = store.use.filteredTodos()  // computed
+
+  return (
+    <div>
+      <select
+        value={filter}
+        onChange={(e) => store.send.filterChanged({ filter: e.target.value })}
+      >
+        <option value="all">All</option>
+        <option value="active">Active</option>
+        <option value="completed">Completed</option>
+      </select>
+      <ul>
+        {filteredTodos.map((todo) => (
+          <li key={todo.id}>
+            <input
+              type="checkbox"
+              checked={todo.completed}
+              onChange={() => store.send.todoToggled({ id: todo.id })}
+            />
+            {todo.title}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+```
+
+## 다음 단계
+
+- [useStore](/ko/react/use-store/) — Provider 시나리오를 위한 context 인식 접근
+- [Provider & withProvider](/ko/react/provider/) — 범위가 지정된 인스턴스가 필요한 이유와 사용 방법

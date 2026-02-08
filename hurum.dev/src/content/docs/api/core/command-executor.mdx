@@ -1,0 +1,110 @@
+---
+title: Command / CommandExecutor
+description: "API reference for CommandExecutor."
+---
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+```
+
+## `CommandExecutor<TInput, TDeps?, TState?>(executorFn)`
+
+Creates a Command/Executor pair. The command is a token that identifies the operation. The executor is the function that runs when the command is dispatched.
+
+### Signature
+
+```ts
+function CommandExecutor<
+  TInput,
+  TDeps = Record<string, never>,
+  TState = unknown,
+>(fn: ExecutorFn<TInput, TDeps, TState>): [Command<TInput>, Executor<TInput, TDeps, TState>]
+```
+
+### Type Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `TInput` | -- | The payload type the executor receives. |
+| `TDeps` | `Record<string, never>` | Dependencies injected via `context.deps`. |
+| `TState` | `unknown` | State shape available via `context.getState()`. |
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `fn` | `(command: TInput, context: ExecutorContext) => void \| Promise<void>` | The executor function. First argument is the command payload. May be sync or async. |
+
+### Returns
+
+A tuple `[Command<TInput>, Executor<TInput, TDeps, TState>]`. Destructure both values:
+
+```ts
+const [SaveCmd, SaveExec] = CommandExecutor<...>(async (command, ctx) => {
+  // ...
+})
+```
+
+### Example
+
+```ts
+const [SaveCmd, SaveExec] = CommandExecutor<
+  { purchase: Purchase },
+  { repo: PurchaseRepo },
+  { purchase: Purchase | null }
+>(async (command, { deps, emit, getState, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  const result = await deps.repo.save(command.purchase)
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+---
+
+## `ExecutorContext<TDeps, TState>`
+
+The context object passed as the second argument to every executor function.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `deps` | `TDeps` | Injected dependencies (API clients, repositories, etc.). Provided at `Store.create({ deps })`. |
+| `emit` | `(event: EventInstance) => void` | Emit an event. Synchronously applies the event to the store, triggering `on` handlers. |
+| `getState` | `() => TState` | Read the current combined state (raw + computed) of the store. |
+| `signal` | `AbortSignal` | Cancellation signal. Aborted when `store.cancel(ref)` or `store.cancelAll()` is called. |
+| `scope` | `Record<string, unknown>` | Access to nested child store instances. Keys match the nested field names declared in the store state. |
+
+### Notes on `emit`
+
+- `emit` is synchronous. The event is applied immediately -- the `on` handler runs, state updates, computed recalculates, and subscribers fire before `emit` returns.
+- After `store.dispose()`, `emit` calls are silently ignored.
+- Executors can call `emit` multiple times. Each call is an independent state transition.
+
+### Notes on `signal`
+
+- Pass `signal` to `fetch()`, `AbortController`-aware APIs, or check `signal.aborted` in loops.
+- When cancelled, the executor should stop work and return. No special cleanup is required.
+
+---
+
+## `Command<TInput>`
+
+An opaque branded type that identifies a command. Commands have no methods or properties accessible to application code. They serve as tokens connecting Intents to Executors.
+
+---
+
+## `Executor<TInput, TDeps, TState>`
+
+An opaque branded type holding the executor function and its associated command. Passed to `Store.executors()` during store definition.
+
+---
+
+## Notes
+
+- Commands are imperative ("do this"). Events are declarative ("this happened"). A `CommandExecutor` bridges the two: it receives a command and produces events.
+- One `CommandExecutor` per side effect. Keep executors focused -- a single executor should handle one concern (e.g. saving to the server, loading data).
+- For simple state transitions that just map a payload to an event, pass the `EventCreator` directly to `Intent()` -- no `CommandExecutor` needed.

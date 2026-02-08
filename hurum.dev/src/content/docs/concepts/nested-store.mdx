@@ -1,0 +1,259 @@
+---
+title: Nested Store
+description: Nested stores compose child stores within a parent for managing complex hierarchical state.
+---
+
+> [!TIP] Before reading
+> This page assumes familiarity with [Store](/concepts/store/), [Event](/concepts/event/), and [Intent](/concepts/intent/). Read those first if you haven't.
+
+Nested stores let you compose child stores inside a parent store. Each child manages its own slice of state while the parent coordinates communication between them.
+
+```ts
+import { Store, Nested } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    id: '',
+    transaction: Nested(TransactionStore),
+    items: Nested.array(ItemStore),
+    currencies: Nested.map(CurrencyStore),
+  },
+})
+```
+
+## How it works
+
+When you write `Nested(ChildStore)` in a state definition, you are creating a **field descriptor** — a marker that tells Hurum "this field holds a child store." When the parent store is created (via `Store.create()` or `useStore()`), Hurum reads these descriptors and automatically creates child store instances. The child's initial state becomes the default value for that field.
+
+```
+Parent store created
+  → Hurum finds Nested descriptors in state
+    → Creates child store instances automatically
+      → Child state is managed by the child store
+```
+
+Hurum provides three types of nested stores:
+
+| Type | Usage | State shape |
+|------|-------|-------------|
+| `Nested(ChildStore)` | Single child | One child instance |
+| `Nested.array(ChildStore)` | Dynamic list | Array of child instances |
+| `Nested.map(ChildStore)` | Keyed collection | Map of key-to-child instances |
+
+When the parent store is created, all nested children are created automatically. When the parent is disposed, all children are disposed with it.
+
+### Communication between stores
+
+Nested stores communicate through events. There are three directions:
+
+```
+Parent Store
+  ├─ Event forwarding (parent → children): automatic
+  │   Parent emits event → all children receive it
+  │
+  ├─ Event bubbling (children → parent): automatic
+  │   Child emits event → parent can handle it in .on()
+  │
+  └─ Relay (parent transforms events): explicit via .relay()
+      Parent event → relay handler → new events → children
+```
+
+**Parent to children (event forwarding).** When an event is emitted in the parent, it is automatically forwarded to all nested children:
+
+```ts
+// Parent emits PurchaseEvent.saved
+// -> All nested children (transaction, items, currencies) receive it
+```
+
+**Children to parent (event bubbling).** When a child emits an event, it bubbles up to the parent. The parent can subscribe to child events in `.on` handlers:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    items: Nested.array(ItemStore),
+    totalItems: 0,
+  },
+})
+  .on(ItemEvent.removed, (state) => ({
+    ...state,
+    totalItems: state.items.length,
+  }))
+```
+
+**Parent relay (cross-child and parent-to-child).** The `.relay` method transforms parent events into child events:
+
+```ts
+.relay(PurchaseEvent.saved, (event, state) => [
+  TransactionEvent.start({ purchaseId: event.purchase.id }),
+])
+```
+
+Relay handlers receive the event and the current state, and return an array of events to dispatch. This is how siblings communicate -- through the parent's relay.
+
+### Accessing child instances with scope
+
+The `scope` property gives direct access to child store instances:
+
+```ts
+// Single child
+PurchaseStore.scope.transaction  // TransactionStore instance
+
+// Array children
+PurchaseStore.scope.items        // ItemStore[] instances
+PurchaseStore.scope.items[0]     // First item store
+
+// Map children
+PurchaseStore.scope.currencies   // Map<string, CurrencyStore>
+PurchaseStore.scope.currencies.get('USD')
+```
+
+Executors can also access scope through their context:
+
+```ts
+const [RecalcCommand, RecalcExecutor] = CommandExecutor<
+  {},
+  {},
+  { items: Nested.array<typeof ItemStore> }
+>((command, { scope }) => {
+  // Delegate to a child store
+  scope.items[0].send(ItemIntents.recalculate({}))
+})
+```
+
+## Three nested types in detail
+
+### Nested (single)
+
+A one-to-one composition. The parent always has exactly one instance of the child:
+
+```ts
+const OrderStore = Store({
+  state: {
+    payment: Nested(PaymentStore),
+    shipping: Nested(ShippingStore),
+  },
+})
+```
+
+### Nested.array
+
+A dynamic list of child instances. Each child manages its own state independently:
+
+```ts
+const TodoListStore = Store({
+  state: {
+    todos: Nested.array(TodoStore),
+  },
+})
+```
+
+When a parent forwards an event to `Nested.array` children, **every** child instance receives the same event. Each child must check whether the event is meant for it — this is the "id guard" pattern. Without it, every child would process every event:
+
+```ts
+// In the child store's .on handler:
+.on(TodoEvent.toggled, (state, payload) => {
+  // Guard: only update if this is the targeted instance
+  if (state.id !== payload.id) return state
+  return { ...state, completed: !state.completed }
+})
+```
+
+### Nested.map
+
+A keyed collection where each key maps to a child store instance:
+
+```ts
+const DashboardStore = Store({
+  state: {
+    widgets: Nested.map(WidgetStore),
+  },
+})
+
+// Access by key
+DashboardStore.scope.widgets.get('chart-1')
+```
+
+## Common patterns
+
+### Parent coordinates children
+
+```ts
+const CheckoutStore = Store({
+  state: {
+    cart: Nested(CartStore),
+    payment: Nested(PaymentStore),
+    shipping: Nested(ShippingStore),
+  },
+})
+  .relay(CartEvent.itemsChanged, (event, state) => [
+    // When cart updates, recalculate shipping
+    ShippingEvent.recalculate({ items: event.items }),
+  ])
+  .relay(PaymentEvent.completed, (event) => [
+    // When payment succeeds, notify cart
+    CartEvent.orderConfirmed({ orderId: event.orderId }),
+  ])
+```
+
+### Sibling communication
+
+Siblings never talk directly. Instead, a child event bubbles to the parent, the parent's relay transforms it, and the resulting event is forwarded to the target child:
+
+```
+Child A emits event
+  -> bubbles to Parent
+    -> Parent relay transforms it
+      -> new event forwarded to Child B
+```
+
+### Nested store with initial state
+
+When creating scoped instances with nested stores:
+
+```ts
+const store = PurchaseStore.create({
+  initialState: {
+    id: 'purchase-1',
+    // Nested state is deep-merged with child defaults
+    transaction: { status: 'pending' },
+    items: [
+      { id: 'item-1', name: 'Widget', amount: 100 },
+      { id: 'item-2', name: 'Gadget', amount: 200 },
+    ],
+  },
+})
+```
+
+## Cross-store coordination
+
+When multiple stores are nested in a root store, the parent's `.computed()` can derive values that span children. This is how you coordinate data across aggregates without coupling children to each other:
+
+```ts
+const AppStore = Store({
+  state: {
+    todos: Nested(TodoStore),
+    modal: Nested(ModalStore),
+  },
+})
+  .computed({
+    openTodo: (state) => {
+      if (!state.modal.openId) return null
+      return state.todos.items.find((t) => t.id === state.modal.openId) ?? null
+    },
+  })
+```
+
+Sending a child's intent through the parent (**root delegation**) ensures middleware always runs:
+
+```ts
+store.send(ModalIntents.open({ id: '123' }))  // flows through parent's middleware
+```
+
+This pattern is especially useful for presentation stores (modals, palettes, filters) that need to reference domain state. See [Working with Nested Stores](/guides/nested-stores/) for detailed examples.
+
+## Tips
+
+- **Keep nesting shallow.** Two levels (parent with children) is the sweet spot. Three or more levels is a signal to reconsider your store boundaries.
+- **Relay depth limit is 5.** If an event triggers a relay that triggers another relay, the chain stops at depth 5. You'll see a dev warning at depth 3+. If you hit this, your store graph is too tangled.
+- **Children are created and disposed with the parent.** You don't manage child lifecycle separately. When the parent disposes, all children dispose too.
+- **Use relay for cross-child communication.** Never try to import one child store into another. The parent is the coordinator.

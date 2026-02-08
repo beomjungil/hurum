@@ -1,0 +1,103 @@
+---
+title: withProvider
+description: "API reference for the withProvider HOC."
+---
+
+```tsx
+import { withProvider } from '@hurum/react'
+```
+
+## `withProvider(StoreDef, Component)`
+
+A higher-order component that wraps a component with a `StoreProvider` and automatically creates a new store instance via `StoreDef.create()`. Each mount of the wrapped component gets its own isolated store.
+
+### Signature
+
+```ts
+function withProvider<P extends object>(
+  def: StoreDefinition,
+  Component: React.ComponentType<P>,
+): React.ComponentType<P>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `def` | `StoreDefinition` | The store definition to provide. |
+| `Component` | `React.ComponentType<P>` | The component to wrap. |
+
+### Returns
+
+A new component with the same props as the original. Internally renders `<StoreProvider of={def} store={...}><Component {...props} /></StoreProvider>`.
+
+### Import
+
+```ts
+import { withProvider } from '@hurum/react'
+```
+
+### Example
+
+```tsx
+function CartPage() {
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  return <div>{items.length} items</div>
+}
+
+// Wrap with provider -- each mount gets a fresh store
+const CartPageWithProvider = withProvider(CartStore, CartPage)
+
+function App() {
+  return <CartPageWithProvider />
+}
+```
+
+---
+
+## How It Works
+
+Internally, `withProvider` uses `useState` to create the store instance:
+
+```tsx
+// Simplified internal implementation
+function WithProvider(props) {
+  const [store] = useState(() => def.create())
+  return (
+    <StoreProvider of={def} store={store}>
+      <WrappedComponent {...props} />
+    </StoreProvider>
+  )
+}
+```
+
+The store instance is created once via `useState`'s initializer function and retained for the component's lifetime.
+
+---
+
+## When to Use
+
+Use `withProvider` when:
+- You want a fresh, isolated store per component mount.
+- You do not need to customize `initialState` or `deps` at runtime.
+- You want a concise one-liner instead of manually wiring up `StoreProvider`.
+
+Use `StoreProvider` directly when:
+- You need to pass `initialState` or `deps`.
+- You need control over the store's lifecycle (e.g. shared instance, dispose timing).
+- Multiple components need to share the same scoped instance.
+
+---
+
+## Display Name
+
+The wrapped component receives a `displayName` of `withProvider(OriginalName)` for easier debugging in React DevTools.
+
+---
+
+## Notes
+
+- `withProvider` does not accept options for `Store.create()`. If you need custom initialization, use `StoreProvider` directly.
+- The store instance survives re-renders but is not shared across different mounts of the wrapped component.
+- Like `StoreProvider`, `withProvider` does not auto-dispose the store on unmount.

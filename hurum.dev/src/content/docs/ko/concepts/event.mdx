@@ -1,0 +1,132 @@
+---
+title: Event
+description: Event는 발생한 사실을 기록해요. Hurum에서 상태를 변경하는 유일한 방법이에요.
+---
+
+Event는 이미 발생한 사실의 불변 기록이에요. Hurum에서 상태를 변경하는 **유일한** 방법이에요.
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+// Create a typed event instance
+PurchaseEvent.saved({ purchase })
+// -> { type: 'Purchase/saved', purchase: ... }
+
+// .type gives the string literal type
+PurchaseEvent.saved.type  // 'Purchase/saved' (literal, not string)
+```
+
+## 동작 방식
+
+Event는 과거 시제로 사실을 기록해요. 무언가가 **saved** 됐고, 무언가가 **incremented** 됐고, 무언가가 **failed** 됐어요. 애플리케이션 코드에서 직접 Event를 생성하지 않아요. 대신 [CommandExecutor](/ko/concepts/command-executor/) 안에서 `emit()`을 호출하면, Event가 [Store](/ko/concepts/store/)로 흘러가서 `.on` 핸들러가 상태를 전환해요.
+
+`Events()` 팩토리는 네임스페이스 접두사와 Event 생성자 맵을 받아요:
+
+```ts
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+  decremented: Event<{ amount: number }>(),
+  reset: Event(),  // no payload
+})
+```
+
+각 키는 Event 생성자 함수가 돼요. 호출하면 `type` 문자열과 페이로드 필드가 펼쳐진 일반 객체가 생성돼요:
+
+```ts
+CounterEvent.incremented({ amount: 5 })
+// -> { type: 'Counter/incremented', amount: 5 }
+
+CounterEvent.reset()
+// -> { type: 'Counter/reset' }
+```
+
+### `.type` 프로퍼티
+
+모든 Event 생성자에는 문자열 리터럴 타입을 담고 있는 `.type` 프로퍼티가 있어요 (예: `'Counter/incremented'`). 내부적으로 디스패치에 사용되지만, 직접 참조할 일은 거의 없어요.
+
+Store의 `.on` 핸들러에서는 **네임스페이스 형태** 또는 **개별 Event 형태**를 사용해요 -- 둘 다 페이로드 타입을 자동으로 추론해요:
+
+```ts
+// Namespace form -- pass the event namespace and a handler map
+const MyStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({
+      ...state,
+      count: state.count + amount,
+    }),
+    reset: () => ({
+      count: 0,
+    }),
+  })
+
+// Per-event form -- one event creator and one handler
+const MyStore2 = Store({ state: { count: 0 } })
+  .on(CounterEvent.incremented, (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }))
+  .on(CounterEvent.reset, () => ({
+    count: 0,
+  }))
+```
+
+네임스페이스 형태에서는 핸들러 맵의 각 키가 Event 네임스페이스의 키에 대응해요. TypeScript가 각 핸들러의 페이로드 타입을 자동으로 추론해요 -- `{ amount }`는 `{ amount: number }`로 정확하게 타입이 지정돼요.
+
+## 자주 사용되는 패턴
+
+### 관련된 Event 그룹화
+
+도메인 개념별로 하나의 `Events()` 호출을 사용하면 정리하기 좋아요:
+
+```ts
+// One group per domain concept
+const CartEvent = Events('Cart', {
+  itemAdded: Event<{ item: CartItem }>(),
+  itemRemoved: Event<{ itemId: string }>(),
+  cleared: Event(),
+})
+
+const CheckoutEvent = Events('Checkout', {
+  started: Event<{ cartId: string }>(),
+  completed: Event<{ orderId: string }>(),
+  failed: Event<{ error: CheckoutError }>(),
+})
+```
+
+### 요청/성공/실패 트리플
+
+비동기 작업은 보통 세 가지 Event를 생성해요:
+
+```ts
+const UserEvent = Events('User', {
+  loadRequested: Event<{ userId: string }>(),
+  loaded: Event<{ user: User }>(),
+  loadFailed: Event<{ error: Error }>(),
+})
+```
+
+Executor는 즉시 `loadRequested`를 emit하고, 비동기 호출이 완료되면 `loaded` 또는 `loadFailed`를 emit해요.
+
+### 페이로드 없는 Event
+
+사실 자체만으로 충분한 경우:
+
+```ts
+const SessionEvent = Events('Session', {
+  started: Event(),
+  ended: Event(),
+})
+```
+
+## 팁
+
+- **Event 이름은 과거 시제로 작성하세요.** Event는 발생한 일을 기록하는 거지, 발생해야 할 일을 기록하는 게 아니에요. `save`가 아닌 `saved`, `increment`가 아닌 `incremented`.
+- **Event는 독립적이에요.** Command, Intent, Store보다 먼저 정의하세요. 다른 것에 의존하지 않아요.
+- **페이로드는 최소한으로 유지하세요.** 상태 전환에 필요한 데이터만 포함하세요. 나머지는 Store에서 파생할 수 있어요.
+- **개념별로 하나의 `Events()`를 사용하세요.** 장바구니 Event와 사용자 Event를 같은 그룹에 넣지 마세요. 네임스페이스를 분리하면 각 Event가 어디에 속하는지 명확해져요.

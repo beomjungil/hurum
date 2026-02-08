@@ -1,0 +1,58 @@
+{
+  "name": "@hurum/devtools",
+  "version": "0.1.0",
+  "description": "Visual devtools panel for @hurum/core stores",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./extension": {
+      "import": {
+        "types": "./dist/extension.d.ts",
+        "default": "./dist/extension.js"
+      },
+      "require": {
+        "types": "./dist/extension.d.cts",
+        "default": "./dist/extension.cjs"
+      }
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "@hurum/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@hurum/core": "workspace:*",
+    "@testing-library/react": "^16.2.0",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.4.0",
+    "vitest": "^3.0.5",
+    "typescript": "^5.7.3",
+    "jsdom": "^26.0.0"
+  },
+  "sideEffects": false,
+  "license": "MIT"
+}

@@ -1,0 +1,116 @@
+---
+title: "TestComputed"
+description: "Test computed values with specific state inputs."
+---
+
+`TestComputed` evaluates a single computed field against a raw state object you provide. It tests the computation function in isolation -- no store instance, no subscriptions, no events.
+
+## Setup
+
+```ts
+import { TestComputed } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+
+const computed = TestComputed(PurchaseStore, 'totalAmount')
+```
+
+`TestComputed` takes a store definition and the name of a computed field. The field name is type-checked -- passing a name that doesn't exist in the store's computed definition is a type error.
+
+## evaluate
+
+Pass a raw state object and get the computed value:
+
+```ts
+expect(computed.evaluate({
+  purchase: { items: [{ amount: 100 }, { amount: 200 }] },
+})).toBe(300)
+
+expect(computed.evaluate({
+  purchase: null,
+})).toBe(0)
+```
+
+The state object you pass is the **raw state** -- the same shape as your store's `state` definition, without computed values. The computed function receives this object and returns the derived value.
+
+## Testing multiple computed fields
+
+Create separate `TestComputed` instances for each field:
+
+```ts
+describe('CounterStore computed', () => {
+  it('doubled', () => {
+    const computed = TestComputed(CounterStore, 'doubled')
+
+    expect(computed.evaluate({ count: 5, multiplier: 2 })).toBe(10)
+    expect(computed.evaluate({ count: 0, multiplier: 2 })).toBe(0)
+    expect(computed.evaluate({ count: -3, multiplier: 2 })).toBe(-6)
+  })
+
+  it('product', () => {
+    const computed = TestComputed(CounterStore, 'product')
+
+    expect(computed.evaluate({ count: 3, multiplier: 4 })).toBe(12)
+    expect(computed.evaluate({ count: 0, multiplier: 10 })).toBe(0)
+  })
+})
+```
+
+## Testing edge cases
+
+Computed functions often need to handle null, empty arrays, or missing data. TestComputed makes it easy to test these cases directly:
+
+```ts
+describe('CartStore totalPrice', () => {
+  const computed = TestComputed(CartStore, 'totalPrice')
+
+  it('sums item prices', () => {
+    expect(computed.evaluate({
+      items: [
+        { name: 'A', price: 10, quantity: 2 },
+        { name: 'B', price: 5, quantity: 1 },
+      ],
+    })).toBe(25)
+  })
+
+  it('returns 0 for empty cart', () => {
+    expect(computed.evaluate({ items: [] })).toBe(0)
+  })
+
+  it('handles single item', () => {
+    expect(computed.evaluate({
+      items: [{ name: 'A', price: 42, quantity: 1 }],
+    })).toBe(42)
+  })
+})
+```
+
+## Error handling
+
+If you pass a field name that doesn't exist in the store's computed definition, `evaluate` throws:
+
+```ts
+// @ts-expect-error -- 'nonExistent' is not a valid computed field
+const computed = TestComputed(CounterStore, 'nonExistent')
+computed.evaluate({ count: 0 })
+// Error: Computed field "nonExistent" not found in store.
+```
+
+If the store has no computed definition at all:
+
+```ts
+const computed = TestComputed(StoreWithNoComputed, 'anything')
+// Error: Store has no computed definition. Cannot test computed field "anything".
+```
+
+## Why test computed values separately?
+
+Computed functions are pure -- they take state in and return a derived value. Testing them directly means:
+
+- **No store setup.** You don't need events, executors, or intents just to test a calculation.
+- **Easy boundary testing.** Pass any state shape, including edge cases that are hard to reach through the normal flow.
+- **Clear failure messages.** When a computed test fails, you know exactly which calculation is wrong and what input caused it.
+
+## Next steps
+
+- [TestReducer](/testing/test-reducer/) -- Test on() handlers as pure functions
+- [TestIntent](/testing/test-intent/) -- Verify intent command composition

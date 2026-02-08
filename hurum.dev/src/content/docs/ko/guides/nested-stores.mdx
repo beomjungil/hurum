@@ -1,0 +1,400 @@
+---
+title: "Nested Store 다루기"
+description: "Event relay와 scope 접근으로 부모-자식 Store 계층을 구성해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 가이드는 [Nested Store](/ko/concepts/nested-store/)를 기반으로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+실제 애플리케이션은 계층적 상태를 가져요. 구매에는 라인 아이템이 있어요. 할 일 목록에는 개별 할 일이 있어요. 설정 페이지에는 각자 고유한 폼 상태를 가진 섹션이 있어요. Hurum은 Nested Store로 이걸 처리해요: 자식 Store 인스턴스를 관리하는 부모 Store가 있고, 이들 사이에 Event가 흘러요.
+
+## Nested Store를 사용할 때
+
+Nested Store는 다음과 같은 경우에 사용해요:
+- 자식 엔티티가 고유한 생명주기를 가질 때 (독립적으로 추가, 제거, 업데이트)
+- 자식 컴포넌트가 형제 상태가 변경될 때가 아니라 자신의 상태가 변경될 때만 리렌더링되길 원할 때
+- 자식이 자체 Intent와 Executor를 가질 때 (예: 각 할 일 아이템을 독립적으로 저장할 수 있는 경우)
+
+단순한 파생 상태에는 Nested Store를 사용하지 마세요. 속성을 그룹화하기만 하면 된다면, 상태의 일반 객체와 Computed 값을 사용하세요.
+
+## 세 가지 Nested 타입
+
+```ts
+import { Nested } from '@hurum/core'
+
+Store({
+  state: {
+    settings: Nested(SettingsStore),           // Single child
+    items: Nested.array(ItemStore),            // Array of children (keyed by id)
+    currencies: Nested.map(CurrencyStore),     // Keyed map of children
+  },
+})
+```
+
+- **`Nested(Store)`** -- 하나의 자식 인스턴스. 1:1 관계에 적합해요 (구매에 하나의 트랜잭션이 있는 경우).
+- **`Nested.array(Store)`** -- `id` 필드로 식별되는 자식 인스턴스의 배열. 목록에 적합해요.
+- **`Nested.map(Store)`** -- 문자열 키로 식별되는 자식 인스턴스의 맵. 룩업 테이블에 적합해요.
+
+## 전체 예시: 아이템이 있는 구매
+
+라인 아이템의 동적 목록이 있는 구매 폼을 만들어 볼게요. 각 아이템은 독립적으로 편집할 수 있어요.
+
+### 1단계: 아이템 Store 정의
+
+```ts
+import { Events, Event, CommandExecutor, Intents, Intent, Store } from '@hurum/core'
+
+// Item events
+const ItemEvent = Events('Item', {
+  nameChanged: Event<{ id: string; name: string }>(),
+  priceChanged: Event<{ id: string; price: number }>(),
+  removed: Event<{ id: string }>(),
+})
+
+// Item executors
+const [ChangeNameCommand, ChangeNameExecutor] = CommandExecutor<
+  { id: string; name: string }
+>((command, { emit }) => {
+  emit(ItemEvent.nameChanged(command))
+})
+
+const [ChangePriceCommand, ChangePriceExecutor] = CommandExecutor<
+  { id: string; price: number }
+>((command, { emit }) => {
+  emit(ItemEvent.priceChanged(command))
+})
+
+// Item intents
+const ItemIntents = Intents('Item', {
+  nameEdited: Intent(ChangeNameCommand),
+  priceEdited: Intent(ChangePriceCommand),
+})
+
+// Item store
+const ItemStore = Store({
+  state: {
+    id: '',
+    name: '',
+    price: 0,
+  },
+})
+  .on(ItemEvent, {
+    nameChanged: (state, { id, name }) => {
+      if (state.id !== id) return state  // Guard: only update matching item
+      return { ...state, name }
+    },
+    priceChanged: (state, { id, price }) => {
+      if (state.id !== id) return state
+      return { ...state, price }
+    },
+  })
+  .intents(ItemIntents)
+  .executors(ChangeNameExecutor, ChangePriceExecutor)
+```
+
+각 `on` 핸들러의 **id 가드**에 주목하세요: `if (state.id !== id) return state`. 이것은 `Nested.array`에서 필수예요. 부모가 Event를 모든 자식에게 전달할 때, 각 자식은 해당 Event가 자신을 위한 것인지 확인해요. 아니라면 상태를 변경하지 않고 반환해요 (리렌더링 없음).
+
+### 2단계: 부모 Store 정의
+
+```ts
+import { Nested } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  itemAdded: Event<{ id: string; name: string; price: number }>(),
+  itemRemoved: Event<{ id: string }>(),
+  saveRequested: Event(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+const [AddItemCommand, AddItemExecutor] = CommandExecutor<
+  { id: string; name: string; price: number }
+>((command, { emit }) => {
+  emit(PurchaseEvent.itemAdded(command))
+})
+
+const [RemoveItemCommand, RemoveItemExecutor] = CommandExecutor<
+  { id: string }
+>((command, { emit }) => {
+  emit(PurchaseEvent.itemRemoved(command))
+})
+
+const PurchaseIntents = Intents('Purchase', {
+  addItemClicked: Intent(AddItemCommand),
+  removeItemClicked: Intent(RemoveItemCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    id: '',
+    items: Nested.array(ItemStore),  // Array of nested child stores
+  },
+})
+  .on(PurchaseEvent, {
+    itemAdded: (state, { id, name, price }) => ({
+      ...state,
+      items: [...state.items, { id, name, price }],
+    }),
+    itemRemoved: (state, { id }) => ({
+      ...state,
+      items: state.items.filter((item) => item.id !== id),
+    }),
+  })
+  .computed({
+    total: (state) =>
+      state.items.reduce((sum, item) => sum + item.price, 0),
+    itemCount: (state) => state.items.length,
+  })
+  .intents(PurchaseIntents)
+  .executors(AddItemExecutor, RemoveItemExecutor)
+```
+
+부모의 `on` 핸들러에서 `itemAdded`는 `items` 배열에 새 일반 객체를 추가해요. Hurum은 새 항목에 대해 자동으로 새 자식 `ItemStore` 인스턴스를 생성해요. 마찬가지로, 배열에서 아이템을 제거하면 해당 자식 Store가 dispose돼요.
+
+`computed` 값(`total`, `itemCount`)은 자식의 상태가 변경될 때마다 재계산돼요.
+
+### 3단계: React 렌더링
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function PurchaseForm() {
+  const store = useStore(PurchaseStore)
+  const total = store.use.total()
+  const itemCount = store.use.itemCount()
+  const itemStores = store.scope.items  // Array of child store instances
+
+  return (
+    <div>
+      <h2>Purchase ({itemCount} items, total: ${total})</h2>
+
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+
+      <button onClick={() => {
+        const id = crypto.randomUUID()
+        store.send.addItemClicked({ id, name: '', price: 0 })
+      }}>
+        Add Item
+      </button>
+    </div>
+  )
+}
+
+function ItemRow({ store }: { store: StoreInstance }) {
+  // This component only re-renders when THIS item's state changes
+  const itemStore = useStore(store)
+  const name = itemStore.use.name()
+  const price = itemStore.use.price()
+  const id = itemStore.getState().id
+
+  return (
+    <div>
+      <input
+        value={name}
+        onChange={(e) => itemStore.send.nameEdited({ id, name: e.target.value })}
+      />
+      <input
+        type="number"
+        value={price}
+        onChange={(e) => itemStore.send.priceEdited({ id, price: Number(e.target.value) })}
+      />
+    </div>
+  )
+}
+```
+
+각 `ItemRow` 컴포넌트는 `store.scope.items`를 통해 자체 Store 인스턴스를 받아요. 한 아이템의 이름을 편집하면, 해당 `ItemRow`만 리렌더링돼요. 부모와 형제 아이템은 영향을 받지 않아요.
+
+## Nested Store의 Event 흐름
+
+Event는 양방향으로 흘러요:
+
+### 부모에서 자식으로 (포워딩)
+
+부모 Event가 적용되면, 모든 자식 Store에 자동으로 전달돼요. 매칭되는 `on` 핸들러가 있는 자식은 처리하고, 없는 자식은 무시해요.
+
+이것이 부모 Event가 자식에게 영향을 줄 수 있는 방법이에요. 예를 들어, 부모의 "clear all" Event가 각 자식을 리셋할 수 있어요.
+
+### 자식에서 부모로 (버블링)
+
+자식이 Event를 emit하면, 부모가 알림을 받아요. 부모는 다음을 수행할 수 있어요:
+1. 자체 `on` 핸들러에서 Event 처리
+2. `.relay()`로 Event를 변환해서 새 Event 생성
+3. 구독자에게 전달
+
+### relay: 자식 Event 변환
+
+부모 레벨에서 자식 Event에 반응하려면 `.relay()`를 사용해요. 예를 들어, 아이템 가격이 변경될 때 합계를 재계산하는 경우:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    items: Nested.array(ItemStore),
+    lastUpdated: null as string | null,
+  },
+})
+  .relay(ItemEvent.priceChanged, (event, state) => {
+    // Return additional events to emit when a child's price changes
+    return [PurchaseEvent.recalculated({ timestamp: new Date().toISOString() })]
+  })
+  .on(PurchaseEvent.recalculated, (state, { timestamp }) => ({
+    ...state,
+    lastUpdated: timestamp,
+  }))
+```
+
+relay 핸들러는 자식의 Event와 부모의 현재 상태를 받아, 부모에서 emit할 새 Event 배열을 반환해요.
+
+## scope 접근
+
+`store.scope`는 자식 Store 인스턴스에 직접 접근을 제공해요:
+
+```ts
+const store = PurchaseStore.create({ ... })
+
+// Nested(single) — direct reference
+store.scope.settings  // StoreInstance of SettingsStore
+
+// Nested.array — array of instances
+store.scope.items     // StoreInstance[] of ItemStore
+store.scope.items[0].send.nameEdited({ id: '1', name: 'Updated' })
+
+// Nested.map — Map of instances
+store.scope.currencies  // Map<string, StoreInstance> of CurrencyStore
+store.scope.currencies.get('USD')?.getState()
+```
+
+Executor도 scope에 접근할 수 있어요. 이렇게 하면 부모 Executor가 자식에게 작업을 위임할 수 있어요:
+
+```ts
+const [SaveAllCommand, SaveAllExecutor] = CommandExecutor<
+  {},
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, scope }) => {
+  const itemStores = scope.items as StoreInstance[]
+
+  for (const itemStore of itemStores) {
+    const item = itemStore.getState()
+    // Read child state and include in parent save
+  }
+
+  emit(PurchaseEvent.saveRequested())
+  // ...
+})
+```
+
+## Cross-store computed
+
+여러 Store를 root Store에 중첩하면, 부모의 `.computed()`가 어떤 자식의 상태든 읽을 수 있어요. 이렇게 하면 자식끼리 서로 결합하지 않으면서도 여러 aggregate에 걸친 파생 값을 만들 수 있어요.
+
+```ts
+const AppStore = Store({
+  state: {
+    todos: Nested(TodoStore),
+    projects: Nested.map(ProjectStore),
+    modal: Nested(TodoDetailModalStore),
+  },
+})
+  .computed({
+    // Cross-store: 모달 상태 + 투두 상태를 조합
+    openTodo: (state) => {
+      const { openTodoId } = state.modal
+      if (!openTodoId) return null
+      return state.todos.items.find((t) => t.id === openTodoId) ?? null
+    },
+
+    // Nested array 자식 상태 집계
+    subtaskCounts: (state) => {
+      const counts: Record<string, { done: number; total: number }> = {}
+      for (const t of state.todos.items) {
+        if (!t.parentId) continue
+        const entry = counts[t.parentId] ?? (counts[t.parentId] = { done: 0, total: 0 })
+        entry.total++
+        if (t.completed) entry.done++
+      }
+      return counts
+    },
+  })
+```
+
+컴포넌트는 root Store를 통해 computed 값을 구독해요. 각 컴포넌트는 자신이 사용하는 computed 값이 실제로 변경될 때만 리렌더링돼요:
+
+```tsx
+function TodoItem({ todo }: { todo: Todo }) {
+  const store = useStore(AppStore)
+  const subtaskCounts = store.use.subtaskCounts()  // 공유 구독
+
+  const count = subtaskCounts[todo.id]
+  // subtaskCounts가 변경될 때만 이 컴포넌트가 리렌더링
+}
+```
+
+이 방법은 각 컴포넌트가 전체 items 배열을 독립적으로 필터링하는 것보다 효율적이에요.
+
+## Root delegation
+
+자식 Store가 부모에 중첩되면, 자식의 Intent를 부모 Store를 통해 보낼 수 있어요. 부모가 자동으로 올바른 자식에게 Intent를 위임해요. 이걸 **root delegation**이라고 해요.
+
+```tsx
+import { TodoDetailModalIntents } from './stores/todo-detail-modal.store'
+
+function TodoItem({ todo }: { todo: Todo }) {
+  const store = useStore(AppStore)
+
+  const handleOpenDetail = () => {
+    // 자식 Intent를 root Store를 통해 전달
+    store.send(TodoDetailModalIntents.open({ todoId: todo.id }))
+  }
+  // ...
+}
+```
+
+Root delegation 덕분에 컴포넌트는 root Store에만 접근하면 돼요 — 자식 Store 인스턴스를 직접 import하거나 접근할 필요가 없어요. Intent는 자식에 도달하기 전에 부모의 middleware 스택(로깅, devtools, 영속화)을 거쳐요.
+
+## Presentation Store 중첩
+
+Nested Store가 반드시 도메인 엔티티만 나타내는 것은 아니에요. 모달, 커맨드 팔레트, 패널 가시성 같은 프레젠테이션 관심사도 root Store의 `Nested(single)` 자식으로 모델링하는 게 좋아요. 이렇게 하면:
+
+1. **Cross-store computed** — 모달의 상태를 부모의 `.computed()`에서 도메인 데이터와 조합할 수 있어요.
+2. **Root delegation** — 컴포넌트가 root Store를 통해 모달 Intent를 보내므로, middleware가 항상 실행돼요.
+3. **싱글턴 문제 없음** — 모달 Store의 라이프사이클이 전역 싱글턴이 아닌 root Store에 묶여요.
+
+```ts
+const AppStore = Store({
+  state: {
+    // 도메인 aggregate
+    todos: Nested(TodoStore),
+    projects: Nested.map(ProjectStore),
+    labels: Nested(LabelStore),
+
+    // 프레젠테이션 Store
+    todoDetailModal: Nested(TodoDetailModalStore),
+    commandPalette: Nested(CommandPaletteStore),
+    filter: Nested(FilterStore),
+  },
+})
+  .computed({
+    // Cross-store: 모달 상태 + 도메인 데이터
+    openTodo: (state) => {
+      const { openTodoId } = state.todoDetailModal
+      if (!openTodoId) return null
+      return state.todos.items.find((t) => t.id === openTodoId) ?? null
+    },
+  })
+```
+
+이 패턴은 프레젠테이션 레이어의 상태 관리를 도메인 레이어와 일관되게 유지해요 — 같은 Event 흐름, 같은 middleware, 같은 devtools 가시성.
+
+## 핵심 포인트
+
+- **목록에는 `Nested.array`를 사용하세요.** 아이템은 `id`로 키가 지정돼요. 새 배열 항목이 자식 Store를 생성하고, 제거된 항목은 dispose돼요.
+- **자식 리듀서에서 id 가드를 사용하세요.** `Nested.array`에서 Event는 모든 자식에게 전달돼요. 각 자식은 `if (state.id !== payload.id) return state`를 확인해야 해요.
+- **Event는 양방향으로 흘러요.** 부모 Event는 자식에게 전달돼요. 자식 Event는 부모로 버블링돼요.
+- **경계를 넘는 반응에는 `.relay()`를 사용하세요.** 부모가 반응해야 할 때 자식 Event를 부모 Event로 변환해요.
+- **`store.scope`는 자식에 직접 접근을 제공해요.** React 컴포넌트에서 렌더링에, Executor에서 위임에 사용해요.
+- **각 자식은 독립적으로 리렌더링돼요.** 세밀한 업데이트를 위해 개별 자식 Store 인스턴스를 컴포넌트에 전달해요.

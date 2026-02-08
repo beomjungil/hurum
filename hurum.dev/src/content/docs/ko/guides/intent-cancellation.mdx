@@ -1,0 +1,225 @@
+---
+title: "Intent 취소"
+description: "signal, cancel(), cancelAll()로 실행 중인 작업을 취소해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 가이드는 [Intent](/ko/concepts/intent/)와 [CommandExecutor](/ko/concepts/command-executor/)를 기반으로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+오래 실행되는 작업에는 중지할 방법이 필요해요. 사용자가 "취소"를 클릭하거나, 다른 페이지로 이동하거나, 이전 요청을 무효화하는 새 요청을 보낼 수 있어요. Hurum은 모두 `AbortSignal`을 기반으로 하는 세 가지 취소 메커니즘을 제공해요.
+
+## Executor의 signal
+
+모든 Executor는 컨텍스트에서 `signal`을 받아요. 이것은 Intent가 취소될 때 중단되는 표준 `AbortSignal`이에요:
+
+```ts
+const [SearchCommand, SearchExecutor] = CommandExecutor<
+  { query: string },
+  { searchApi: SearchApi }
+>(async (command, { deps, emit, signal }) => {
+  emit(SearchEvent.searchStarted({ query: command.query }))
+
+  if (signal.aborted) return
+
+  const results = await deps.searchApi.search(command.query, { signal })
+
+  if (signal.aborted) return
+
+  emit(SearchEvent.searchCompleted({ results }))
+})
+```
+
+모든 `await` 전후에 `signal.aborted`를 확인하세요. `AbortSignal`을 지원하는 API(예: `fetch`)에 `signal`을 직접 전달해서, 기반 네트워크 요청도 함께 취소할 수 있어요.
+
+## 세 가지 취소 방법
+
+### 1. cancel(ref) -- 특정 Intent 취소
+
+`store.send()`는 `IntentRef`를 반환해요. 이걸 `store.cancel()`에 전달해서 해당 실행만 중단해요:
+
+```ts
+// Start the operation
+const ref = store.send.searchStarted({ query: 'shoes' })
+
+// Later, cancel just this one
+store.cancel(ref)
+```
+
+여러 동시 작업이 있을 때 다른 작업에 영향을 주지 않고 하나만 취소하고 싶을 때 유용해요.
+
+### 2. cancelAll() -- 모두 취소
+
+`store.cancelAll()`은 실행 중인 모든 Executor를 중단해요:
+
+```ts
+store.cancelAll()
+```
+
+사용자가 페이지에서 이동하거나 Store의 전체 비동기 상태를 리셋해야 할 때 사용해요.
+
+### 3. 동일한 Intent 타입 재전송
+
+새 Intent를 보낼 때, 이전에 동일한 Intent의 실행은 **자동으로 취소되지 않아요**. 각 `send()`는 독립적인 실행을 생성해요. "최신 요청만 유효" 동작을 원한다면, 이전 것을 명시적으로 취소하세요:
+
+```ts
+let lastSearchRef: IntentRef | null = null
+
+function handleSearchInput(query: string) {
+  if (lastSearchRef) store.cancel(lastSearchRef)
+  lastSearchRef = store.send.searchStarted({ query })
+}
+```
+
+## 취소 버튼 패턴
+
+저장 버튼과 취소 버튼이 있는 폼의 전체 예시예요.
+
+### Event와 Executor
+
+```ts
+import { Events, Event, CommandExecutor, Intents, Intent, Store } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+  cancelled: Event(),
+})
+
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+
+const [CancelCommand, CancelExecutor] = CommandExecutor<
+  {}
+>((command, { emit }) => {
+  emit(PurchaseEvent.cancelled(command))
+})
+```
+
+### Intent와 Store
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(SavePurchaseCommand),
+  cancelClicked: Intent(CancelCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+    cancelled: (state) => ({
+      ...state,
+      saving: false,
+      error: null,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SavePurchaseExecutor, CancelExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+### React 컴포넌트
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function PurchaseForm({ purchase }: { purchase: Purchase }) {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+
+  const handleSubmit = () => {
+    store.send.submitButtonClicked({ purchase })
+  }
+
+  const handleCancel = () => {
+    store.cancelAll()
+    store.send.cancelClicked({})
+  }
+
+  return (
+    <div>
+      <button onClick={handleSubmit} disabled={saving}>
+        {saving ? 'Saving...' : 'Submit'}
+      </button>
+      {saving && (
+        <button onClick={handleCancel}>Cancel</button>
+      )}
+    </div>
+  )
+}
+```
+
+취소 핸들러는 두 가지 작업을 수행해요:
+1. `store.cancelAll()`은 실행 중인 저장 Executor의 signal을 중단해요
+2. `store.send.cancelClicked({})`는 상태를 리셋하는 취소 Intent를 전송해요
+
+이 두 단계 접근 방식은 의도적이에요. `cancelAll()`은 signal만 중단해요 -- 상태를 변경하지 않아요. 상태를 업데이트하려면 별도의 Intent를 보내야 해요. 상태 변경은 항상 Event를 통해 흘러야 하기 때문이에요.
+
+## signal을 fetch에 전달하기
+
+의존성이 `fetch` 또는 `AbortSignal`을 받는 API를 사용한다면, 전달하세요:
+
+```ts
+const [FetchCommand, FetchExecutor] = CommandExecutor<
+  { url: string },
+  { httpClient: { get(url: string, options: { signal: AbortSignal }): Promise<Response> } }
+>(async (command, { deps, emit, signal }) => {
+  emit(FetchEvent.started({ url: command.url }))
+
+  try {
+    const response = await deps.httpClient.get(command.url, { signal })
+    if (signal.aborted) return
+    const data = await response.json()
+    emit(FetchEvent.completed({ data }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(FetchEvent.failed({ error: (error as Error).message }))
+  }
+})
+```
+
+signal이 중단되면, `fetch`는 `AbortError`를 throw해요. catch 블록은 `signal.aborted`를 확인하고 조용히 반환하므로, 취소에 대한 실패 Event는 emit되지 않아요.
+
+## 핵심 포인트
+
+- **비동기 Executor에서 항상 `signal.aborted`를 확인하세요.** 모든 `await` 지점 전후로 확인해요.
+- **`cancelAll()`은 signal을 중단하지만 상태는 변경하지 않아요.** 상태를 리셋하려면 별도의 취소 Intent를 보내세요.
+- **`cancel(ref)`는 특정 실행을 대상으로 해요.** `store.send()`가 반환하는 `IntentRef`를 사용해요.
+- **기반 API에 `signal`을 전달하세요.** 핸들러뿐만 아니라 실제 네트워크 요청도 취소돼요.
+- **취소는 조용해요.** `signal.aborted`가 true가 되면, Executor는 더 이상 Event를 emit하지 않고 반환해야 해요. Store 상태는 취소 전의 상태 그대로 유지돼요.

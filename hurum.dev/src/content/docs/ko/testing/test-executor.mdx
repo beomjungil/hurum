@@ -1,0 +1,193 @@
+---
+title: "TestExecutor"
+description: "개별 Executor를 격리된 환경에서 단위 테스트해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`TestExecutor`는 모의 컨텍스트로 Executor 함수를 격리된 환경에서 실행해요. deps와 상태를 제공하고, Executor를 실행하고, 어떤 Event가 emit되었는지 assert해요.
+
+## 설정
+
+```ts
+import { TestExecutor } from '@hurum/core/testing'
+import { SaveExecutor } from './executors'
+import { PurchaseEvent } from './events'
+
+const mockRepo = {
+  save: vi.fn().mockResolvedValue(savedPurchase),
+}
+
+const executor = TestExecutor(SaveExecutor, {
+  deps: { repository: mockRepo },
+  state: { purchase: null, saving: false },
+})
+```
+
+### 옵션
+
+| 옵션 | 타입 | 설명 |
+|--------|------|-------------|
+| `deps` | `Record<string, unknown>` | `context.deps`로 주입되는 모의 의존성 |
+| `state` | `Record<string, unknown>` | `context.getState()`가 반환하는 정적 상태 |
+
+둘 다 선택사항이에요. 없으면 `deps`는 `{}`로, `state`는 `{}`로 기본 설정돼요.
+
+<Aside type="note">
+  TestExecutor의 `state`는 정적이에요 -- Event가 emit되어도 변하지 않아요. TestExecutor는 Event를 캡처하지만 리듀서를 실행하지 않아요. Executor가 `emit()` 후에 `getState()`를 호출해서 업데이트된 상태를 기대한다면, 대신 [TestStore](/ko/testing/test-store/)를 사용하세요.
+</Aside>
+
+## run
+
+주어진 입력으로 Executor를 실행해요:
+
+```ts
+await executor.run({ id: '123', purchase: mockPurchase })
+```
+
+`run()`은 Executor 함수가 완료될 때 (비동기 작업 포함) 해결되는 Promise를 반환해요.
+
+## assertEmitted
+
+실행 중 emit된 정확한 Event를 순서대로 검증해요:
+
+```ts
+await executor.run({ id: '123' })
+
+executor.assertEmitted([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+비교에 구조적 동등성을 사용해요. Event 타입과 페이로드 모두 정확히 일치해야 해요.
+
+불일치가 있으면:
+
+```
+Emitted event mismatch at index 1:
+  Expected: {"type":"Purchase/saved","purchase":{"id":"123"}}
+  Received: {"type":"Purchase/saveFailed","error":"Network error"}
+```
+
+## emittedEvents
+
+캡처된 Event 배열에 직접 접근해서 커스텀 assertion에 사용해요:
+
+```ts
+await executor.run({ id: '123' })
+
+expect(executor.emittedEvents).toHaveLength(2)
+expect(executor.emittedEvents[0]!.type).toBe('Purchase/saveRequested')
+```
+
+## abort
+
+AbortSignal을 통한 취소 시뮬레이션이에요:
+
+```ts
+const executor = TestExecutor(SearchExecutor, {
+  deps: { api: mockApi },
+})
+
+executor.abort()
+await executor.run({ query: 'test' })
+
+// Executor should check signal.aborted and skip work
+expect(mockApi.search).not.toHaveBeenCalled()
+```
+
+`run()` 전에 `abort()`를 호출해서 사전 취소된 상태를 시뮬레이션해요. Executor가 abort signal을 올바르게 존중하는지 테스트해요.
+
+## 일반적인 패턴
+
+### 에러 처리 테스트
+
+```ts
+it('emits saveFailed on error', async () => {
+  const mockRepo = { save: vi.fn().mockRejectedValue(new Error('Timeout')) }
+  const executor = TestExecutor(SaveExecutor, {
+    deps: { repository: mockRepo },
+  })
+
+  await executor.run({ purchase: mockPurchase })
+
+  executor.assertEmitted([
+    PurchaseEvent.saveRequested({ id: '123' }),
+    PurchaseEvent.saveFailed({ error: 'Timeout' }),
+  ])
+})
+```
+
+### 조건부 로직 테스트
+
+```ts
+it('skips save when already saving', async () => {
+  const executor = TestExecutor(SaveExecutor, {
+    deps: { repository: mockRepo },
+    state: { saving: true },
+  })
+
+  await executor.run({ purchase: mockPurchase })
+
+  // Executor checks getState().saving and returns early
+  executor.assertEmitted([])
+})
+```
+
+## 전체 예시
+
+```ts title="save-executor.test.ts"
+import { describe, it, expect, vi } from 'vitest'
+import { TestExecutor } from '@hurum/core/testing'
+import { SaveExecutor } from './executors'
+import { PurchaseEvent } from './events'
+
+describe('SaveExecutor', () => {
+  const mockPurchase = { id: '123', name: 'Widget' }
+
+  it('emits saveRequested then saved on success', async () => {
+    const savedPurchase = { ...mockPurchase, savedAt: '2026-01-01' }
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn().mockResolvedValue(savedPurchase) } },
+    })
+
+    await executor.run({ purchase: mockPurchase })
+
+    executor.assertEmitted([
+      PurchaseEvent.saveRequested({ id: '123' }),
+      PurchaseEvent.saved({ purchase: savedPurchase }),
+    ])
+  })
+
+  it('emits saveFailed on rejection', async () => {
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn().mockRejectedValue(new Error('fail')) } },
+    })
+
+    await executor.run({ purchase: mockPurchase })
+
+    executor.assertEmitted([
+      PurchaseEvent.saveRequested({ id: '123' }),
+      PurchaseEvent.saveFailed({ error: 'fail' }),
+    ])
+  })
+
+  it('does not emit after abort', async () => {
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn() } },
+    })
+
+    executor.abort()
+    await executor.run({ purchase: mockPurchase })
+
+    // Only the synchronous saveRequested before the first await
+    expect(executor.emittedEvents.length).toBeLessThanOrEqual(1)
+  })
+})
+```
+
+## 다음 단계
+
+- [TestReducer](/ko/testing/test-reducer/) -- on() 핸들러를 순수 함수로 테스트
+- [TestStore](/ko/testing/test-store/) -- 전체 통합 테스트

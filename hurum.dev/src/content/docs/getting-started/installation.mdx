@@ -1,0 +1,71 @@
+---
+title: "Installation"
+description: "Install @hurum/core and @hurum/react to get started with Hurum."
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## Install the core package
+
+`@hurum/core` is the framework-agnostic foundation. It has **zero runtime dependencies**.
+
+<Tabs>
+  <TabItem label="npm">
+    ```sh
+    npm install @hurum/core
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add @hurum/core
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add @hurum/core
+    ```
+  </TabItem>
+</Tabs>
+
+## Add React bindings (optional)
+
+If you are using React, install `@hurum/react` for hooks, Provider, and the `Store.use.*` API.
+
+<Tabs>
+  <TabItem label="npm">
+    ```sh
+    npm install @hurum/react
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```sh
+    pnpm add @hurum/react
+    ```
+  </TabItem>
+  <TabItem label="yarn">
+    ```sh
+    yarn add @hurum/react
+    ```
+  </TabItem>
+</Tabs>
+
+`@hurum/react` only peer-depends on `react` — no other dependencies are pulled in.
+
+## Requirements
+
+| Requirement | Version |
+|---|---|
+| TypeScript | 5.0+ |
+| React (for `@hurum/react`) | 18+ |
+
+Hurum relies on TypeScript features like `const` type parameters and template literal types for full type inference. TypeScript 5.0 or later is required.
+
+`@hurum/core` works in any JavaScript runtime — Node.js, Deno, Bun, browsers, React Native. No framework dependency at all.
+
+## Build formats
+
+Both packages ship as **CJS + ESM dual builds**, so they work with any bundler or runtime without configuration.
+
+## Next steps
+
+You are ready to go. Head to the [Quick Start](/getting-started/quick-start/) to build your first Hurum store.

@@ -1,0 +1,147 @@
+---
+title: Utility Types
+description: "API reference for type helpers: StoreOf, StateOf, RawStateOf, DepsOf."
+---
+
+```ts
+import type { StoreOf, StateOf, RawStateOf, DepsOf, DetectConflicts } from '@hurum/core'
+```
+
+Type utilities for extracting types from a store definition. Useful when writing functions, hooks, or tests that need to reference store types without duplicating them.
+
+## `StoreOf<T>`
+
+Extracts the store instance type from a store definition.
+
+```ts
+type StoreOf<T> = T extends StoreDefinition<infer D, infer R, infer C, infer I>
+  ? StoreInstance<D, R, C, I>
+  : never
+```
+
+### Example
+
+```ts
+const CartStore = Store({ state: { items: [] as CartItem[] } })
+  .computed({ total: (s) => s.items.reduce((sum, i) => sum + i.price, 0) })
+  .intents(CartIntents)
+  .executors(AddItemExec)
+
+// Extract the instance type
+type CartInstance = StoreOf<typeof CartStore>
+
+function processCart(store: CartInstance) {
+  const state = store.getState()
+  //    ^? { items: CartItem[], total: number }
+}
+```
+
+---
+
+## `StateOf<T>`
+
+Extracts the combined state type (raw + computed) from a store definition. This is the type returned by `store.getState()`.
+
+```ts
+type StateOf<T> = T extends StoreDefinition<unknown, infer R, infer C>
+  ? ResolvedState<R> & C
+  : never
+```
+
+### Example
+
+```ts
+type CartState = StateOf<typeof CartStore>
+// { items: CartItem[], total: number }
+
+function renderTotal(state: CartState) {
+  return `$${state.total.toFixed(2)}`
+}
+```
+
+---
+
+## `RawStateOf<T>`
+
+Extracts only the raw state type (without computed fields) from a store definition. This is the shape that `on` handlers must return.
+
+```ts
+type RawStateOf<T> = T extends StoreDefinition<unknown, infer R, unknown>
+  ? R
+  : never
+```
+
+### Example
+
+```ts
+type CartRawState = RawStateOf<typeof CartStore>
+// { items: CartItem[] }
+// Note: `total` is NOT included (it's computed)
+```
+
+---
+
+## `DepsOf<T>`
+
+Extracts the dependency type from a store definition.
+
+```ts
+type DepsOf<T> = T extends StoreDefinition<infer D, unknown, unknown>
+  ? D
+  : never
+```
+
+### Example
+
+```ts
+const CartStore = Store({ state: { items: [] as CartItem[] } })
+  .deps<{ repo: CartRepo; analytics: Analytics }>()
+
+type CartDeps = DepsOf<typeof CartStore>
+// { repo: CartRepo; analytics: Analytics }
+
+function createTestDeps(): CartDeps {
+  return {
+    repo: new MockCartRepo(),
+    analytics: new MockAnalytics(),
+  }
+}
+```
+
+---
+
+## `DetectConflicts<A, B>`
+
+Detects conflicting keys between two dependency types. If the same key exists in both `A` and `B` with different types, it surfaces as a union of the conflicting key names.
+
+```ts
+type DetectConflicts<A, B> = {
+  [K in keyof A & keyof B]: A[K] extends B[K]
+    ? B[K] extends A[K]
+      ? never
+      : K
+    : K
+}[keyof A & keyof B]
+```
+
+### Example
+
+```ts
+type ParentDeps = { api: RestApi; logger: Logger }
+type ChildDeps = { api: GraphQLApi; cache: Cache }
+
+type Conflicts = DetectConflicts<ParentDeps, ChildDeps>
+// 'api' -- because RestApi !== GraphQLApi
+
+// Use this to catch mismatches early:
+type AssertNoConflicts = [Conflicts] extends [never] ? true : false
+//   ^? false -- there IS a conflict
+```
+
+---
+
+## Notes
+
+- These types work with the store definition (the builder), not the instance. Pass `typeof MyStore`, not a store instance.
+- `StateOf` includes resolved nested state. A `Nested(ChildStore)` field resolves to the child's full state (raw + computed).
+- All utility types return `never` if the input is not a valid `StoreDefinition`.

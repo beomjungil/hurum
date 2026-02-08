@@ -1,0 +1,177 @@
+---
+title: Middleware
+description: Middleware are pure observers for logging, devtools, and analytics. They cannot modify state.
+---
+
+> [!TIP] Before reading
+> This page assumes familiarity with [Store](/concepts/store/) and [Event](/concepts/event/). Read those first if you haven't.
+
+Middleware are read-only observers that watch the store without changing it. They are the right place for logging, analytics, devtools integration, and persistence.
+
+```ts
+import { type Middleware } from '@hurum/core'
+
+const analytics = (): Middleware => ({
+  name: 'analytics',
+  onEvent: (event, state) => {
+    trackEvent(event.type, event)
+  },
+  onError: (error, context) => {
+    reportError(error, { intent: context.intent })
+  },
+})
+
+// Register in the store builder chain
+const MyStore = Store({ state: { count: 0 } })
+  .on({ /* ... */ })
+  .intents(MyIntents)
+  .executors(MyExecutor)
+  .middleware(logger(), devtools(), analytics())
+```
+
+## How it works
+
+A middleware is an object with a `name` and one or more optional hook methods. You register middleware via `.middleware()` at the end of the Store builder chain.
+
+Middleware hooks are called **after** the action has already happened. They observe the result -- they cannot prevent, modify, or intercept anything.
+
+### Middleware interface
+
+```ts
+interface Middleware {
+  name: string
+  onEvent?(event: StoreEvent, state: State): void
+  onStateChange?(prevState: State, nextState: State): void
+  onIntentStart?(intent: string, payload: unknown): void
+  onIntentEnd?(intent: string, payload: unknown): void
+  onError?(error: Error, context: ErrorContext): void
+}
+```
+
+| Hook | Called when | Arguments |
+|------|------------|-----------|
+| `onEvent` | After an event is emitted and state is updated | The event object, the new state |
+| `onStateChange` | After state changes (including computed recalculation) | Previous state, next state |
+| `onIntentStart` | When an intent begins executing | Intent name, the payload |
+| `onIntentEnd` | When an intent finishes (success or failure) | Intent name, the payload |
+| `onError` | When an error occurs in an executor | The error, context with intent info |
+
+### Execution order
+
+Middleware hooks are called at specific points in the intent lifecycle:
+
+```
+store.send(intent)
+  → onIntentStart
+    → executor runs
+      → emit(event)
+        → Store.on handler runs (state updates)
+        → onEvent
+        → onStateChange
+    → (executor finishes)
+  → onIntentEnd
+```
+
+If an executor throws, `onError` is called instead of `onIntentEnd`.
+
+### Multiple middleware
+
+You can register multiple middleware. They are called in the order they are registered:
+
+```ts
+.middleware(
+  logger(),      // called first
+  devtools(),    // called second
+  analytics(),   // called third
+)
+```
+
+## Common patterns
+
+### Logging middleware
+
+```ts
+const logger = (): Middleware => ({
+  name: 'logger',
+  onEvent: (event, state) => {
+    console.log(`[Event] ${event.type}`, event)
+  },
+  onStateChange: (prev, next) => {
+    console.log('[State]', { prev, next })
+  },
+  onIntentStart: (intent, payload) => {
+    console.log(`[Intent Start] ${intent}`, payload)
+  },
+  onIntentEnd: (intent, payload) => {
+    console.log(`[Intent End] ${intent}`, payload)
+  },
+  onError: (error, context) => {
+    console.error(`[Error] in ${context.intent}:`, error)
+  },
+})
+```
+
+### Analytics middleware
+
+```ts
+const analyticsMiddleware = (tracker: AnalyticsTracker): Middleware => ({
+  name: 'analytics',
+  onEvent: (event) => {
+    // Track specific events
+    if (event.type.startsWith('Checkout/')) {
+      tracker.track(event.type, event)
+    }
+  },
+  onError: (error, context) => {
+    tracker.trackError(error, {
+      intent: context.intent,
+      timestamp: Date.now(),
+    })
+  },
+})
+```
+
+### Persistence middleware
+
+```ts
+const persist = (storageKey: string): Middleware => ({
+  name: 'persist',
+  onStateChange: (_prev, next) => {
+    localStorage.setItem(storageKey, JSON.stringify(next))
+  },
+})
+```
+
+### Conditional middleware
+
+Since middleware are just objects, you can conditionally include them:
+
+```ts
+const MyStore = Store({ state: { /* ... */ } })
+  .on({ /* ... */ })
+  .middleware(
+    ...[
+      process.env.NODE_ENV === 'development' && logger(),
+      process.env.NODE_ENV === 'development' && devtools(),
+      analytics(),
+    ].filter(Boolean) as Middleware[],
+  )
+```
+
+## Built-in middleware
+
+Hurum ships with several built-in middleware:
+
+| Middleware | Purpose |
+|-----------|---------|
+| `logger()` | Logs events, state changes, intents, and errors to the console |
+| `devtools()` | Integrates with browser devtools for time-travel debugging |
+| `persist()` | Persists state to localStorage or a custom storage backend |
+| `undoRedo()` | Tracks state history for undo/redo support |
+
+## Tips
+
+- **Middleware cannot modify state.** If you need to react to an event and trigger new behavior, use [relay](/concepts/nested-store/) or emit additional events from an executor. Middleware is strictly observe-only.
+- **Keep middleware lightweight.** Middleware hooks run synchronously in the state update path. Heavy computation (like serializing large state for persistence) should be deferred with `requestIdleCallback` or similar.
+- **Use `name` for debugging.** The `name` property helps identify which middleware is which in error messages and devtools.
+- **Don't put business logic in middleware.** Logging what happened is fine. Deciding what should happen next belongs in executors and relay handlers.

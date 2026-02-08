@@ -1,0 +1,145 @@
+---
+title: Command / CommandExecutor
+description: CommandExecutor is the explicit boundary for all side effects. It pairs what to execute with how to execute it.
+---
+
+A CommandExecutor is a single definition that produces both a Command (what to execute) and an Executor (how to execute it). It is the **only** place side effects live in Hurum.
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },          // input type
+  { repository: PurchaseRepository }, // deps type
+  { purchase: Purchase | null }    // state slice type
+>(async (command, { deps, emit, getState, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+
+  if (signal.aborted) return
+
+  const result = await deps.repository.save(command.purchase)
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+## Type parameters
+
+`CommandExecutor` accepts up to three generic parameters:
+
+```ts
+CommandExecutor<InputType, DepsType, ScopeType>
+```
+
+| Parameter | Required | Purpose |
+|-----------|----------|---------|
+| `InputType` | Yes | The command payload type. Defines what data the executor receives. |
+| `DepsType` | No | The dependencies type. Defines what services (API clients, repositories) the executor can use via `deps`. Defaults to `{}`. |
+| `ScopeType` | No | The scope type for nested store access. When a store has nested children, executors can access child stores through `scope`. Also types `getState()` return value. Defaults to `{}`. |
+
+The third parameter is only needed when your executor reads state via `getState()` or accesses nested child stores via `scope`. For simple executors, you can omit it.
+
+## How it works
+
+`CommandExecutor` returns a `[Command, Executor]` tuple. The Command is what you pass to an [Intent](/concepts/intent/). The Executor is what you register on the [Store](/concepts/store/). You never need to define these separately -- the types are inferred from the executor function.
+
+The executor function receives two arguments:
+
+1. **`command`** -- the input payload, typed by the first generic parameter
+2. **`context`** -- the execution context with five properties:
+
+| Property | Description |
+|----------|-------------|
+| `deps` | Injected dependencies from the Store (API clients, repositories, etc.) |
+| `emit(event)` | Emit an event. **Synchronous** -- the Store's `.on` handler runs immediately before `emit` returns. |
+| `getState()` | Read the current state. Always reflects the latest state after any `emit`. |
+| `signal` | `AbortSignal` for cancellation. Check `signal.aborted` before async boundaries. |
+| `scope` | Access [nested child stores](/concepts/nested-store/) for delegation. |
+
+### emit is synchronous
+
+This is a key design choice. When you call `emit(SomeEvent(...))`, the Store's `.on` handler runs **immediately**, state updates, and computed values recalculate -- all before `emit` returns. This means `getState()` right after `emit()` always reflects the updated state:
+
+```ts
+const [LoadCommand, LoadExecutor] = CommandExecutor<
+  { id: string },
+  { api: Api },
+  { loading: boolean; data: Item | null }
+>(async (command, { deps, emit, getState }) => {
+  emit(ItemEvent.loadStarted({ id: command.id }))
+
+  // getState() already reflects the loadStarted transition
+  console.log(getState().loading) // true
+
+  const item = await deps.api.fetchItem(command.id)
+  emit(ItemEvent.loaded({ item }))
+})
+```
+
+## Common patterns
+
+### Async operation with loading state
+
+```ts
+const [FetchUsersCommand, FetchUsersExecutor] = CommandExecutor<
+  { page: number },
+  { api: UserApi },
+  { loading: boolean; users: User[] }
+>(async (command, { deps, emit, signal }) => {
+  emit(UserEvent.fetchStarted({ page: command.page }))
+
+  try {
+    const users = await deps.api.getUsers(command.page, { signal })
+    emit(UserEvent.fetched({ users }))
+  } catch (error) {
+    if (!signal.aborted) {
+      emit(UserEvent.fetchFailed({ error: toAppError(error) }))
+    }
+  }
+})
+```
+
+### Checking state before proceeding
+
+```ts
+const [SubmitCommand, SubmitExecutor] = CommandExecutor<
+  { formData: FormData },
+  { api: Api },
+  { submitting: boolean }
+>(async (command, { deps, emit, getState }) => {
+  if (getState().submitting) return  // already submitting, skip
+
+  emit(FormEvent.submitStarted({}))
+  const result = await deps.api.submit(command.formData)
+  emit(FormEvent.submitted({ result }))
+})
+```
+
+### Respecting cancellation
+
+```ts
+const [SearchCommand, SearchExecutor] = CommandExecutor<
+  { query: string },
+  { api: SearchApi },
+  { results: SearchResult[] }
+>(async (command, { deps, emit, signal }) => {
+  emit(SearchEvent.searching({ query: command.query }))
+
+  // Pass signal to fetch so it aborts the network request
+  const results = await deps.api.search(command.query, { signal })
+
+  // Check after await -- another intent may have cancelled us
+  if (signal.aborted) return
+
+  emit(SearchEvent.resultsReceived({ results }))
+})
+```
+
+## Tips
+
+- **One executor, one concern.** Each CommandExecutor should handle one logical operation. If you find yourself emitting many unrelated events, split into multiple executors.
+- **Always check `signal.aborted` after `await`.** The intent may have been cancelled while you were waiting. Emitting events after cancellation is harmless (silently ignored), but skipping unnecessary work is cleaner.
+- **Emit early, emit often.** Emit a "started" event before async work so the UI can show loading state immediately. Emit separate success/failure events so the Store can handle each case cleanly.
+

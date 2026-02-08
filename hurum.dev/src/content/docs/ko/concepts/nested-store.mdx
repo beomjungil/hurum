@@ -1,0 +1,255 @@
+---
+title: Nested Store
+description: Nested Store는 복잡한 계층적 상태를 관리하기 위해 부모 Store 안에 자식 Store를 합성해요.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 페이지는 [Store](/ko/concepts/store/), [Event](/ko/concepts/event/), [Intent](/ko/concepts/intent/)에 대한 이해를 전제로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Nested Store는 부모 Store 안에 자식 Store를 합성할 수 있게 해요. 각 자식은 자신의 상태 조각을 관리하면서 부모가 이들 간의 통신을 조율해요.
+
+```ts
+import { Store, Nested } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    id: '',
+    transaction: Nested(TransactionStore),
+    items: Nested.array(ItemStore),
+    currencies: Nested.map(CurrencyStore),
+  },
+})
+```
+
+## 동작 방식
+
+Nested(ChildStore)를 상태 정의에 쓰면, 이건 **필드 디스크립터**를 만드는 거예요 — Hurum에게 '이 필드는 자식 store를 담는다'고 알려주는 표시예요. 부모 store가 생성되면(Store.create()나 useStore()로), Hurum이 이 디스크립터를 읽고 자동으로 자식 store 인스턴스를 만들어요. 자식의 초기 상태가 해당 필드의 기본값이 돼요.
+
+Hurum은 세 가지 유형의 Nested Store를 제공해요:
+
+| 유형 | 용도 | 상태 형태 |
+|------|-------|-------------|
+| `Nested(ChildStore)` | 단일 자식 | 자식 인스턴스 하나 |
+| `Nested.array(ChildStore)` | 동적 리스트 | 자식 인스턴스 배열 |
+| `Nested.map(ChildStore)` | 키 기반 컬렉션 | 키-자식 인스턴스 맵 |
+
+부모 Store가 생성되면 모든 Nested 자식이 자동으로 생성돼요. 부모가 dispose되면 모든 자식도 함께 dispose돼요.
+
+```
+Parent Store
+  ├─ Event 전달 (부모 → 자식): 자동
+  │   부모가 event를 emit → 모든 자식이 받음
+  │
+  ├─ Event 버블링 (자식 → 부모): 자동
+  │   자식이 event를 emit → 부모가 .on()에서 처리 가능
+  │
+  └─ Relay (부모가 event 변환): .relay()로 명시적
+      부모 event → relay 핸들러 → 새 event → 자식에 전달
+```
+
+### Store 간 통신
+
+Nested Store는 Event로 통신해요. 세 가지 방향이 있어요:
+
+**부모에서 자식으로 (Event 전달).** 부모에서 Event가 emit되면, 모든 Nested 자식에게 자동으로 전달돼요:
+
+```ts
+// Parent emits PurchaseEvent.saved
+// -> All nested children (transaction, items, currencies) receive it
+```
+
+**자식에서 부모로 (Event 버블링).** 자식이 Event를 emit하면 부모로 버블링돼요. 부모는 `.on` 핸들러에서 자식 Event를 구독할 수 있어요:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    items: Nested.array(ItemStore),
+    totalItems: 0,
+  },
+})
+  .on(ItemEvent.removed, (state) => ({
+    ...state,
+    totalItems: state.items.length,
+  }))
+```
+
+**부모 relay (자식 간 및 부모-자식 간).** `.relay` 메서드는 부모 Event를 자식 Event로 변환해요:
+
+```ts
+.relay(PurchaseEvent.saved, (event, state) => [
+  TransactionEvent.start({ purchaseId: event.purchase.id }),
+])
+```
+
+relay 핸들러는 Event와 현재 상태를 받고, 디스패치할 Event 배열을 반환해요. 이게 형제 Store 간 통신 방법이에요 -- 부모의 relay를 거쳐서.
+
+### scope로 자식 인스턴스 접근
+
+`scope` 프로퍼티로 자식 Store 인스턴스에 직접 접근할 수 있어요:
+
+```ts
+// Single child
+PurchaseStore.scope.transaction  // TransactionStore instance
+
+// Array children
+PurchaseStore.scope.items        // ItemStore[] instances
+PurchaseStore.scope.items[0]     // First item store
+
+// Map children
+PurchaseStore.scope.currencies   // Map<string, CurrencyStore>
+PurchaseStore.scope.currencies.get('USD')
+```
+
+Executor도 컨텍스트로 scope에 접근할 수 있어요:
+
+```ts
+const [RecalcCommand, RecalcExecutor] = CommandExecutor<
+  {},
+  {},
+  { items: Nested.array<typeof ItemStore> }
+>((command, { scope }) => {
+  // Delegate to a child store
+  scope.items[0].send(ItemIntents.recalculate({}))
+})
+```
+
+## 세 가지 Nested 유형 상세
+
+### Nested (single)
+
+일대일 합성이에요. 부모는 항상 정확히 하나의 자식 인스턴스를 가져요:
+
+```ts
+const OrderStore = Store({
+  state: {
+    payment: Nested(PaymentStore),
+    shipping: Nested(ShippingStore),
+  },
+})
+```
+
+### Nested.array
+
+자식 인스턴스의 동적 리스트예요. 각 자식은 독립적으로 자신의 상태를 관리해요:
+
+```ts
+const TodoListStore = Store({
+  state: {
+    todos: Nested.array(TodoStore),
+  },
+})
+```
+
+부모가 Nested.array 자식에게 event를 전달하면, **모든** 자식 인스턴스가 같은 event를 받아요. 각 자식은 그 event가 자기를 위한 건지 확인해야 해요 — 이게 'id 가드' 패턴이에요. 이걸 안 하면 모든 자식이 모든 event를 처리하게 돼요:
+
+```ts
+// In the child store's .on handler:
+.on(TodoEvent.toggled, (state, payload) => {
+  // Guard: only update if this is the targeted instance
+  if (state.id !== payload.id) return state
+  return { ...state, completed: !state.completed }
+})
+```
+
+### Nested.map
+
+각 키가 자식 Store 인스턴스에 매핑되는 키 기반 컬렉션이에요:
+
+```ts
+const DashboardStore = Store({
+  state: {
+    widgets: Nested.map(WidgetStore),
+  },
+})
+
+// Access by key
+DashboardStore.scope.widgets.get('chart-1')
+```
+
+## 자주 사용되는 패턴
+
+### 부모가 자식을 조율
+
+```ts
+const CheckoutStore = Store({
+  state: {
+    cart: Nested(CartStore),
+    payment: Nested(PaymentStore),
+    shipping: Nested(ShippingStore),
+  },
+})
+  .relay(CartEvent.itemsChanged, (event, state) => [
+    // When cart updates, recalculate shipping
+    ShippingEvent.recalculate({ items: event.items }),
+  ])
+  .relay(PaymentEvent.completed, (event) => [
+    // When payment succeeds, notify cart
+    CartEvent.orderConfirmed({ orderId: event.orderId }),
+  ])
+```
+
+### 형제 간 통신
+
+형제끼리 직접 통신하지 않아요. 대신, 자식 Event가 부모로 버블링되고, 부모의 relay가 이를 변환해서, 결과 Event가 대상 자식에게 전달돼요:
+
+```
+Child A emits event
+  -> bubbles to Parent
+    -> Parent relay transforms it
+      -> new event forwarded to Child B
+```
+
+### 초기 상태가 있는 Nested Store
+
+Nested Store가 있는 스코프 인스턴스를 생성할 때:
+
+```ts
+const store = PurchaseStore.create({
+  initialState: {
+    id: 'purchase-1',
+    // Nested state is deep-merged with child defaults
+    transaction: { status: 'pending' },
+    items: [
+      { id: 'item-1', name: 'Widget', amount: 100 },
+      { id: 'item-2', name: 'Gadget', amount: 200 },
+    ],
+  },
+})
+```
+
+## Cross-store 조율
+
+여러 Store가 root Store에 중첩되면, 부모의 `.computed()`가 자식들에 걸친 파생 값을 만들 수 있어요. 자식끼리 결합하지 않으면서 aggregate 간 데이터를 조율하는 방법이에요:
+
+```ts
+const AppStore = Store({
+  state: {
+    todos: Nested(TodoStore),
+    modal: Nested(ModalStore),
+  },
+})
+  .computed({
+    openTodo: (state) => {
+      if (!state.modal.openId) return null
+      return state.todos.items.find((t) => t.id === state.modal.openId) ?? null
+    },
+  })
+```
+
+자식의 Intent를 부모를 거쳐 보내면 (**root delegation**) middleware가 항상 실행돼요:
+
+```ts
+store.send(ModalIntents.open({ id: '123' }))  // 부모의 middleware를 거침
+```
+
+이 패턴은 도메인 상태를 참조해야 하는 프레젠테이션 Store(모달, 팔레트, 필터)에 특히 유용해요. 자세한 예시는 [Nested Store 다루기](/ko/guides/nested-stores/)를 참고하세요.
+
+## 팁
+
+- **중첩은 얕게 유지하세요.** 두 단계(부모와 자식)가 적정 수준이에요. 세 단계 이상이면 Store 경계를 재고해야 한다는 신호예요.
+- **relay 깊이 제한은 5예요.** Event가 relay를 트리거하고 그 relay가 또 다른 relay를 트리거하면, 체인은 깊이 5에서 멈춰요. 깊이 3 이상에서 개발 경고가 표시돼요. 이 제한에 도달하면 Store 그래프가 너무 복잡한 거예요.
+- **자식은 부모와 함께 생성되고 dispose돼요.** 자식 라이프사이클을 별도로 관리하지 않아요. 부모가 dispose되면 모든 자식도 dispose돼요.
+- **자식 간 통신에는 relay를 사용하세요.** 한 자식 Store를 다른 자식에 import하려 하지 마세요. 부모가 조율자예요.

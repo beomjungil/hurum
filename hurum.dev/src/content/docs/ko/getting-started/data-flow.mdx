@@ -1,0 +1,243 @@
+---
+title: "데이터 흐름"
+description: "Hurum의 단일 데이터 흐름 경로를 자세히 알아보세요: Intent → Command → CommandExecutor → emit(Event) → Store.on → relay → Computed → 구독자."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Hurum에서 모든 상태 변경은 이 경로를 따라요:
+
+```
+Intent (사용자가 원하는 것)
+  → Command (실행할 것)
+    → CommandExecutor (사이드 이펙트 경계)
+      → emit(Event) (일어난 일을 기록)
+        → Store.on (순수 상태 전이)
+          → relay (Store 간 Event 전달)
+          → Computed (파생 상태, 즉시 재계산)
+            → 구독자 알림 (React 리렌더)
+```
+
+카운터 증가든 검증과 롤백이 포함된 다단계 API 호출이든, 이게 경로예요. 매번. 각 단계를 살펴볼게요.
+
+## Intent
+
+Intent는 사용자 액션에서 하나 이상의 Command로의 선언적 매핑이에요.
+
+```ts
+const CounterIntents = Intents('Counter', {
+  plusButtonClicked: Intent(IncrementCommand),
+  minusButtonClicked: Intent(DecrementCommand),
+})
+```
+
+**Intent는 사용자가 한 일을 설명해요**, 시스템이 해야 할 일이 아니에요. `plusButtonClicked`라는 이름은 사용자의 액션을 캡처해요. `Intent(IncrementCommand)` 부분은 "이것이 일어나면 IncrementCommand를 실행해"라고 말하는 거예요.
+
+하나의 Intent가 다단계 흐름을 위해 여러 Command를 참조할 수 있어요:
+
+```ts
+const CheckoutIntents = Intents('Checkout', {
+  submitClicked: Intent(ValidateCommand, ChargeCommand, ConfirmCommand),
+})
+```
+
+기본적으로 여러 Command는 순차적으로 실행돼요 -- `ValidateCommand`가 실패하면 `ChargeCommand`는 실행되지 않아요. 병렬 fail-fast 실행에는 `Intent.all(...)`을, 병렬 독립 실행에는 `Intent.allSettled(...)`를 사용할 수도 있어요.
+
+`store.send.plusButtonClicked({ amount: 1 })`를 호출하면 Intent를 디스패치하는 거예요. Store는 어떤 Command를 실행할지 결정하고 매칭되는 Executor를 찾아요.
+
+## Command
+
+Command는 **별도로 정의하지 않아요**. Command 타입은 Zod가 스키마에서 TypeScript 타입을 추론하듯이 executor의 입력 타입에서 추론돼요.
+
+```ts
+// This creates BOTH the Command type and the Executor
+const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+  { amount: number }
+>((command, { emit }) => {
+  emit(CounterEvent.incremented(command))
+})
+```
+
+여기서 `IncrementCommand`는 참조 토큰이에요 -- Intent를 Executor에 연결해요. Command를 인스턴스화하거나 형태를 수동으로 정의할 필요가 없어요. 타입은 Executor의 정의에서 흘러나와요.
+
+이건 의도적이에요: "Command를 정의했는데 Executor 작성을 깜빡했다" 류의 버그를 원천적으로 제거해요.
+
+## CommandExecutor
+
+CommandExecutor는 **모든 사이드 이펙트를 위한 명시적 경계**예요. 애플리케이션의 모든 사이드 이펙트 -- API 호출, localStorage 접근, 타이머, 난수 생성 -- 가 executor 안에 있어요.
+
+```ts
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { id: string; data: FormData },   // command type
+  { api: ApiClient }                  // deps type
+>(async (command, { deps, emit, getState, signal }) => {
+  const result = await deps.api.save(command.id, command.data, { signal })
+  emit(ItemEvent.saved({ id: command.id, item: result }))
+})
+```
+
+executor 함수는 두 가지 인수를 받아요 -- Command 페이로드와 컨텍스트 객체:
+
+| 속성 | 목적 |
+|---|---|
+| `command` | 첫 번째 인수 -- Intent에서 온 페이로드, Command에 맞게 타입 지정 |
+| `deps` | 주입된 의존성 (API 클라이언트, 서비스 등) |
+| `emit` | 상태 전이를 트리거하기 위해 Event를 emit |
+| `getState` | 실행 중 어느 시점에서든 현재 Store 상태 읽기 |
+| `signal` | 취소 지원을 위한 AbortSignal |
+
+## emit(Event)
+
+executor가 `emit()`을 호출하면, Event는 **동기적으로** 처리돼요. 이건 중요한 설계 결정이에요.
+
+```ts
+CommandExecutor<{ id: string }, { api: ApiClient }>(
+  async (command, { deps, emit, getState }) => {
+    emit(ItemEvent.loadStarted({ id: command.id }))
+    // getState() here already reflects the loadStarted handler
+
+    const item = await deps.api.fetch(command.id)
+    emit(ItemEvent.loadSucceeded({ id: command.id, item }))
+    // getState() here already reflects the loadSucceeded handler
+  }
+)
+```
+
+`emit(event)`를 호출하는 순간:
+1. 해당 Event 타입에 대한 Store의 `.on()` 핸들러가 즉시 실행돼요
+2. 상태가 업데이트돼요
+3. Computed 값이 재계산돼요
+4. 구독자에게 알림이 전달돼요
+
+`emit()` 바로 다음 줄에서 `getState()`를 호출하면 업데이트된 상태를 얻어요. 배칭도, 비동기 큐도 없어요. 이게 executor를 예측 가능하게 만들어요 -- 항상 현재 상태를 알 수 있어요.
+
+<Aside type="note">
+  `store.dispose()` 이후의 emit은 조용히 무시되므로, 정리 관련 레이스 컨디션이 에러를 던지지 않아요.
+</Aside>
+
+## Store.on
+
+`Store.on` 핸들러는 **순수 함수**예요. 현재 상태와 Event 페이로드를 받아 새로운 상태를 반환해요.
+
+```ts
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({
+      ...state,
+      count: state.count + amount,
+    }),
+    reset: (state) => ({
+      ...state,
+      count: 0,
+    }),
+  })
+```
+
+`.on()` 핸들러 규칙:
+- **순수 함수만.** API 호출, console.log, 어떤 종류의 사이드 이펙트도 안 돼요.
+- **새로운 상태 객체를 반환.** Hurum은 참조 동등성으로 변경을 감지해요.
+- **Event 타입당 하나의 핸들러.** 각 Event 타입은 정확히 하나의 핸들러에 매핑돼요.
+
+`.on()` 메서드는 두 가지 형태가 있어요: 네임스페이스 기반 (위에 표시) 과 Event 개별 형태. 네임스페이스 형태 `.on(CounterEvent, { incremented: handler })`에서 각 키는 네임스페이스의 해당 Event에 매핑돼요. 페이로드 타입은 자동으로 추론돼요 -- `{ amount }`는 `{ amount: number }`로 올바르게 타입이 지정돼요.
+
+## relay
+
+relay는 부모와 자식 Store 간에 Event를 변환해요. Store에 Nested 자식이 있을 때, relay 핸들러가 Store 경계를 넘어 Event를 전달하거나 변환해요.
+
+```ts
+const ParentStore = Store({
+  state: {
+    items: Nested.array(ChildStore),
+  },
+})
+  .relay(ParentEvent.cleared, (event, state) => [
+    ChildEvent.reset({}),
+  ])
+```
+
+relay 핸들러는 Event와 현재 상태를 받아 자식 Store에 전달할 Event 배열을 반환해요. 이게 부모 액션이 자식에게 전파되는 방식이에요.
+
+relay는 무한 루프를 방지하기 위해 기본 깊이 제한이 5예요. relay 깊이가 3을 초과하면 개발 환경 경고가 발생해요.
+
+## Computed
+
+Computed 값은 **Proxy 기반 의존성 추적**을 써서 상태에서 파생돼요.
+
+```ts
+const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+  .on({ /* ... */ })
+  .computed({
+    doubled: (state) => state.count * 2,
+    product: (state) => state.count * state.multiplier,
+  })
+```
+
+주요 동작:
+
+- **즉시 재계산.** 추적된 의존성이 변경되면 Computed 값은 즉시 재계산돼요 -- 읽을 때 지연(lazy) 계산하지 않아요.
+- **Proxy 추적 의존성.** Hurum은 Proxy를 써서 각 Computed 함수가 읽는 상태 필드를 감지해요. `doubled`가 `state.count`만 읽는다면, `state.multiplier`를 변경해도 `doubled`의 재계산을 트리거하지 않아요.
+- **구조적 동등성.** Computed 함수가 이전 결과와 구조적으로 동일한 값을 반환하면, 참조가 보존돼요. Computed 값이 재계산되었지만 같은 출력을 생성했을 때 불필요한 React 리렌더를 방지해요.
+
+Computed 값은 일반 상태 필드처럼 읽어요. React에서 `CounterStore.use.doubled()`는 `CounterStore.use.count()`와 동일하게 동작해요.
+
+## 구독자
+
+구독자는 상태와 Computed 값이 업데이트된 후 알림을 받아요. React에서는 `useSyncExternalStore`로 이루어지므로, 업데이트는 동기적이며 티어링(tearing)이 없어요.
+
+```tsx
+function Counter() {
+  // Each hook subscribes to one specific field
+  const count = CounterStore.use.count()       // re-renders when count changes
+  const doubled = CounterStore.use.doubled()   // re-renders when doubled changes
+  // ...
+}
+```
+
+각 `use.*` 훅은 단일 필드를 구독해요. `multiplier`가 변경되어도 `count`가 변경되지 않으면, `count`만 읽는 컴포넌트는 리렌더되지 않아요. 이 세분성은 기본으로 내장되어 있어요 -- 기본 필드 접근에 Selector 함수가 필요 없어요.
+
+여러 필드를 결합하는 파생 값에는 `useSelector`를 사용하세요:
+
+```tsx
+function Summary() {
+  const summary = CounterStore.useSelector(
+    (state) => `${state.count} x ${state.multiplier} = ${state.product}`
+  )
+  // ...
+}
+```
+
+## 전체 그림
+
+카운터 예제에서 "+1"을 클릭했을 때의 전체 추적이에요:
+
+```
+User clicks "+1" button
+  → onClick calls CounterStore.send.plusButtonClicked({ amount: 1 })
+    → Store resolves: plusButtonClicked maps to IncrementCommand
+      → Store finds IncrementExecutor for IncrementCommand
+        → IncrementExecutor calls emit(CounterEvent.incremented({ amount: 1 }))
+          → Store.on[CounterEvent.incremented.type] runs:
+            state { count: 0, multiplier: 2 } → state { count: 1, multiplier: 2 }
+            → Computed recalculates: doubled = 2, product = 2
+              → useSyncExternalStore triggers re-render
+                → UI shows Count: 1, Doubled: 2, Product: 2
+```
+
+그리고 비동기 API 호출의 같은 추적이에요:
+
+```
+User clicks "Save" button
+  → onClick calls store.send.saveClicked({ id: '123', data: formData })
+    → Store resolves: saveClicked maps to SaveCommand
+      → Store finds SaveExecutor for SaveCommand
+        → SaveExecutor runs:
+          1. emit(ItemEvent.saveStarted({ id: '123' }))
+             → Store.on runs → state.saving = true → UI shows spinner
+          2. await deps.api.save('123', formData, { signal })
+          3. emit(ItemEvent.saveSucceeded({ id: '123', item: result }))
+             → Store.on runs → state.saving = false, state.item = result → UI shows result
+```
+
+**파이프라인은 동일해요.** 유일한 차이점은 executor 내부에서 일어나는 일이에요. 그 전(Intent, Command 해석)과 후(Store.on, Computed, 구독자)의 모든 것은 같아요.
+
+이게 Hurum의 핵심 약속이에요: 하나의 경로, 매번.

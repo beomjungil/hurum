@@ -1,0 +1,9 @@
+{
+  "copy.markdown": "Markdown 복사",
+  "open": "AI에서 열기",
+  "open.chatgpt": "ChatGPT에서 열기",
+  "open.claude": "Claude에서 열기",
+  "open.t3chat": "T3 Chat에서 열기",
+  "open.v0": "v0에서 열기",
+  "view.markdown": "Markdown으로 보기"
+}

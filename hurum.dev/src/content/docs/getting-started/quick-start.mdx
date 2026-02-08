@@ -1,0 +1,219 @@
+---
+title: "Quick Start"
+description: "Build a counter with Hurum in 5 minutes. Learn the full Intent → Command → Executor → Event → Store.on pipeline with a practical example."
+---
+
+import { Steps } from '@astrojs/starlight/components';
+
+Let's build a counter. It is the simplest possible example, but it goes through the **full Hurum pipeline** — the same pipeline a complex async checkout flow would use.
+
+## The counter, step by step
+
+<Steps>
+
+1. **Define Events — what can happen**
+
+    Events record things that **already happened** — think past tense. Not "increment the counter" but "the counter was incremented." This distinction matters: events are facts, not commands. A counter can be incremented, decremented, or reset.
+
+    ```ts title="counter/events.ts"
+    import { Events, Event } from '@hurum/core'
+
+    export const CounterEvent = Events('Counter', {
+      incremented: Event<{ amount: number }>(),
+      decremented: Event<{ amount: number }>(),
+      reset: Event<{}>(),
+    })
+    ```
+
+    `Events('Counter', { ... })` creates a namespaced group. Each event has a typed payload — `incremented` carries `{ amount: number }`, while `reset` carries nothing.
+
+2. **Define CommandExecutors — how things happen**
+
+    A CommandExecutor is where side effects live — API calls, localStorage, timers, anything that talks to the outside world. Each `CommandExecutor` call returns a `[Command, Executor]` tuple: the Command is a reference token used by Intents, and the Executor is the function that does the work. For a counter there are no real side effects, but the executor still shows you exactly where they would go.
+
+    ```ts title="counter/executors.ts"
+    import { CommandExecutor } from '@hurum/core'
+    import { CounterEvent } from './events'
+
+    export const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+      { amount: number }
+    >((command, { emit }) => {
+      emit(CounterEvent.incremented(command))
+    })
+
+    export const [DecrementCommand, DecrementExecutor] = CommandExecutor<
+      { amount: number }
+    >((command, { emit }) => {
+      emit(CounterEvent.decremented(command))
+    })
+
+    export const [ResetCommand, ResetExecutor] = CommandExecutor<
+      {}
+    >((command, { emit }) => {
+      emit(CounterEvent.reset(command))
+    })
+    ```
+
+    Each `CommandExecutor` call returns a `[Command, Executor]` tuple. The executor receives the command payload and a context object — here we only use `emit`, but real executors also get `deps`, `getState`, `signal`, and `scope`.
+
+3. **Define Intents — what the user wants to do**
+
+    An Intent is a declarative mapping: "when the user does X, run commands Y and Z." Intents describe **what the user did** (clicked a button, submitted a form), not what the system should do. This naming convention makes your code self-documenting.
+
+    ```ts title="counter/intents.ts"
+    import { Intents, Intent } from '@hurum/core'
+    import { IncrementCommand, DecrementCommand, ResetCommand } from './executors'
+
+    export const CounterIntents = Intents('Counter', {
+      plusButtonClicked: Intent(IncrementCommand),
+      minusButtonClicked: Intent(DecrementCommand),
+      resetButtonClicked: Intent(ResetCommand),
+    })
+    ```
+
+    Notice the naming: `plusButtonClicked`, not `increment`. Intents describe **what the user did**, not what the system should do. This distinction matters when one user action triggers multiple commands.
+
+4. **Define the Store — state + transitions + everything**
+
+    The Store is the central unit. It wires together initial state, `.on()` handlers (pure functions that react to events), `.computed()` values (derived state), and the intents + executors you defined above.
+
+    ```ts title="counter/store.ts"
+    import { Store } from '@hurum/core'
+    import { CounterEvent } from './events'
+    import { CounterIntents } from './intents'
+    import { IncrementExecutor, DecrementExecutor, ResetExecutor } from './executors'
+
+    export const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+      .on(CounterEvent, {
+        incremented: (state, { amount }) => ({
+          ...state,
+          count: state.count + amount,
+        }),
+        decremented: (state, { amount }) => ({
+          ...state,
+          count: state.count - amount,
+        }),
+        reset: (state) => ({
+          ...state,
+          count: 0,
+        }),
+      })
+      .computed({
+        doubled: (state) => state.count * 2,
+        product: (state) => state.count * state.multiplier,
+      })
+      .intents(CounterIntents)
+      .executors(IncrementExecutor, DecrementExecutor, ResetExecutor)
+    ```
+
+    `.on()` handlers are pure functions: `(state, payload) => newState`. No side effects.
+    `.computed()` values are derived from state and recalculate eagerly when their dependencies change.
+
+5. **Use in React — read state and send intents**
+
+    Import `useStore` from `@hurum/react`, then use `store.use.*` hooks in your components.
+
+    ```tsx title="counter/Counter.tsx"
+    import { useStore } from '@hurum/react'
+    import { CounterStore } from './store'
+    import { CounterIntents } from './intents'
+
+    function Counter() {
+      const store = useStore(CounterStore)
+      const count = store.use.count()
+      const doubled = store.use.doubled()
+      const product = store.use.product()
+
+      return (
+        <div>
+          <p>Count: {count}</p>
+          <p>Doubled: {doubled}</p>
+          <p>Product: {product}</p>
+          <button onClick={() => store.send.plusButtonClicked({ amount: 1 })}>
+            +1
+          </button>
+          <button onClick={() => store.send.minusButtonClicked({ amount: 1 })}>
+            -1
+          </button>
+          <button onClick={() => store.send.resetButtonClicked({})}>
+            Reset
+          </button>
+        </div>
+      )
+    }
+    ```
+
+    `store.use.count()` subscribes to just the `count` field — if `multiplier` changes but `count` doesn't, this component won't re-render. Each `use.*` hook is granular by default.
+
+    `store.send.plusButtonClicked({ amount: 1 })` is a shorthand for `store.send(CounterIntents.plusButtonClicked({ amount: 1 }))`. Both work — use whichever you prefer.
+
+6. **Provider for scoped instances (optional)**
+
+    By default, `useStore(CounterStore)` outside a provider operates on a **global singleton**. If you need multiple independent instances (e.g., two counters on the same page), use a `StoreProvider`:
+
+    ```tsx title="counter/ScopedCounter.tsx"
+    import { useStore, StoreProvider } from '@hurum/react'
+    import { CounterStore } from './store'
+
+    function ScopedCounter() {
+      const store = useStore(CounterStore)
+      const count = store.use.count()
+
+      return (
+        <div>
+          <p>Count: {count}</p>
+          <button onClick={() => store.send.plusButtonClicked({ amount: 1 })}>
+            +1
+          </button>
+        </div>
+      )
+    }
+
+    // Each StoreProvider gets its own independent store instance
+    function App() {
+      const storeA = CounterStore.create()
+      const storeB = CounterStore.create()
+
+      return (
+        <>
+          <StoreProvider of={CounterStore} store={storeA}>
+            <ScopedCounter />
+          </StoreProvider>
+          <StoreProvider of={CounterStore} store={storeB}>
+            <ScopedCounter />
+          </StoreProvider>
+        </>
+      )
+    }
+    ```
+
+    Inside a `StoreProvider`, `useStore(CounterStore)` returns the scoped instance. Outside a provider, it falls back to the global singleton.
+
+</Steps>
+
+## What just happened?
+
+When you clicked "+1", here is the exact sequence that ran:
+
+```
+1. onClick → store.send.plusButtonClicked({ amount: 1 })
+2. Intent maps to IncrementCommand → Store matches IncrementExecutor
+3. IncrementExecutor runs → emit(CounterEvent.incremented({ amount: 1 }))
+4. Store.on[CounterEvent.incremented.type] runs → state becomes { count: 1, multiplier: 2 }
+5. Computed recalculates: doubled = 2, product = 2
+6. React subscribers notified → component re-renders
+```
+
+This is the same path every state change takes. For async operations, the only difference is what happens inside the executor — the rest of the pipeline is identical.
+
+> [!TIP]
+> The counter executors only call `emit` — they have no real side effects. In a real application, executors make API calls, access localStorage, run validation, and more — all using `deps`, `getState`, and `signal` from the context object. The pipeline stays the same regardless of complexity.
+
+## Next steps
+
+Now that you have seen the pipeline in action, learn how each piece works in detail:
+
+- [Data Flow](/getting-started/data-flow/) — Deep dive into every step of the pipeline
+- [Event](/concepts/event/) — How events work and why they are facts
+- [CommandExecutor](/concepts/command-executor/) — The side-effect boundary
+- [Store](/concepts/store/) — State, transitions, computed, and the builder API

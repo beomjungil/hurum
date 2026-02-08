@@ -1,0 +1,240 @@
+---
+title: "Data Flow"
+description: "A deep explanation of Hurum's single data flow path: Intent → Command → CommandExecutor → emit(Event) → Store.on → relay → Computed → Subscribers."
+---
+
+Every state change in Hurum follows this path:
+
+```
+Intent (what the user wants)
+  → Command (what to execute)
+    → CommandExecutor (side-effect boundary)
+      → emit(Event) (record what happened)
+        → Store.on (pure state transition)
+          → relay (event forwarding between stores)
+          → Computed (derived state, recalculated eagerly)
+            → Subscribers notified (React re-renders)
+```
+
+Whether it is a counter increment or a multi-step API call with validation and rollback, this is the path. Every time. Let's walk through each step.
+
+## Intent
+
+An Intent is a declarative mapping from a user action to one or more Commands.
+
+```ts
+const CounterIntents = Intents('Counter', {
+  plusButtonClicked: Intent(IncrementCommand),
+  minusButtonClicked: Intent(DecrementCommand),
+})
+```
+
+**Intents describe what the user did**, not what the system should do. The name `plusButtonClicked` captures the user's action. The `Intent(IncrementCommand)` part says "when this happens, run IncrementCommand."
+
+A single Intent can reference multiple Commands for multi-step flows:
+
+```ts
+const CheckoutIntents = Intents('Checkout', {
+  submitClicked: Intent(ValidateCommand, ChargeCommand, ConfirmCommand),
+})
+```
+
+By default, multiple commands run sequentially — if `ValidateCommand` fails, `ChargeCommand` never runs. You can also use `Intent.all(...)` for parallel fail-fast execution or `Intent.allSettled(...)` for parallel independent execution.
+
+When you call `store.send.plusButtonClicked({ amount: 1 })`, you are dispatching an Intent. The store resolves which Commands to run and finds the matching Executors.
+
+## Command
+
+Commands are **not defined separately**. A Command type is inferred from the executor's input type, similar to how Zod infers TypeScript types from schemas.
+
+```ts
+// This creates BOTH the Command type and the Executor
+const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+  { amount: number }
+>((command, { emit }) => {
+  emit(CounterEvent.incremented(command))
+})
+```
+
+The `IncrementCommand` here is a reference token — it connects an Intent to its Executor. You never instantiate a Command or define its shape manually. The type flows from the Executor's definition.
+
+This is intentional: it eliminates an entire category of "I defined a Command but forgot to write the Executor" bugs.
+
+## CommandExecutor
+
+The CommandExecutor is the **explicit boundary for all side effects**. Every side effect in your application — API calls, localStorage access, timers, random number generation — lives inside an executor.
+
+```ts
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { id: string; data: FormData },   // command type
+  { api: ApiClient }                  // deps type
+>(async (command, { deps, emit, getState, signal }) => {
+  const result = await deps.api.save(command.id, command.data, { signal })
+  emit(ItemEvent.saved({ id: command.id, item: result }))
+})
+```
+
+The executor function receives two arguments — the command payload and a context object:
+
+| Property | Purpose |
+|---|---|
+| `command` | The first argument — the payload from the Intent, typed to match the Command |
+| `deps` | Injected dependencies (API clients, services, etc.) |
+| `emit` | Emit events to trigger state transitions |
+| `getState` | Read current store state at any point during execution |
+| `signal` | AbortSignal for cancellation support |
+
+## emit(Event)
+
+When an executor calls `emit()`, the event is processed **synchronously**. This is a critical design choice.
+
+```ts
+CommandExecutor<{ id: string }, { api: ApiClient }>(
+  async (command, { deps, emit, getState }) => {
+    emit(ItemEvent.loadStarted({ id: command.id }))
+    // getState() here already reflects the loadStarted handler
+
+    const item = await deps.api.fetch(command.id)
+    emit(ItemEvent.loadSucceeded({ id: command.id, item }))
+    // getState() here already reflects the loadSucceeded handler
+  }
+)
+```
+
+The moment you call `emit(event)`:
+1. The Store's `.on()` handler for that event type runs immediately
+2. State is updated
+3. Computed values recalculate
+4. Subscribers are notified
+
+If you call `getState()` on the very next line after `emit()`, you get the updated state. There is no batching, no async queue. This makes executors predictable — you always know the current state.
+
+> [!NOTE]
+> Emit after `store.dispose()` is silently ignored, so cleanup-related race conditions don't throw errors.
+
+## Store.on
+
+`Store.on` handlers are **pure functions**. They take the current state and an event payload, and return a new state.
+
+```ts
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({
+      ...state,
+      count: state.count + amount,
+    }),
+    reset: (state) => ({
+      ...state,
+      count: 0,
+    }),
+  })
+```
+
+Rules for `.on()` handlers:
+- **Pure functions only.** No API calls, no console.log, no side effects of any kind.
+- **Return a new state object.** Hurum uses reference equality to detect changes.
+- **One handler per event type.** Each event type maps to exactly one handler.
+
+The `.on()` method has two forms: namespace-based (shown above) and per-event. With namespace form `.on(CounterEvent, { incremented: handler })`, each key maps to the corresponding event in the namespace. Payload types are inferred automatically — `{ amount }` is correctly typed to `{ amount: number }`.
+
+## relay
+
+Relay transforms events between parent and child stores. When a store has nested children, relay handlers forward or translate events across the store boundary.
+
+```ts
+const ParentStore = Store({
+  state: {
+    items: Nested.array(ChildStore),
+  },
+})
+  .relay(ParentEvent.cleared, (event, state) => [
+    ChildEvent.reset({}),
+  ])
+```
+
+A relay handler receives an event and the current state, and returns an array of events to forward to child stores. This is how parent actions cascade to children.
+
+Relay has a default depth limit of 5 to prevent infinite loops. If relay depth exceeds 3, a development warning is emitted.
+
+## Computed
+
+Computed values are derived from state using **Proxy-based dependency tracking**.
+
+```ts
+const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+  .on({ /* ... */ })
+  .computed({
+    doubled: (state) => state.count * 2,
+    product: (state) => state.count * state.multiplier,
+  })
+```
+
+Key behaviors:
+
+- **Eager recalculation.** When a tracked dependency changes, computed values recalculate immediately — not lazily on read.
+- **Proxy-tracked dependencies.** Hurum uses a Proxy to detect which state fields each computed function reads. If `doubled` only reads `state.count`, changing `state.multiplier` won't trigger a recalculation of `doubled`.
+- **Structural equality.** If a computed function returns a value structurally equal to its previous result, the reference is preserved. This prevents unnecessary React re-renders when a computed value recalculates but produces the same output.
+
+Computed values are read just like regular state fields. In React, `CounterStore.use.doubled()` works the same as `CounterStore.use.count()`.
+
+## Subscribers
+
+Subscribers are notified after state and computed values are updated. In React, this happens through `useSyncExternalStore`, which means updates are synchronous and tearing-free.
+
+```tsx
+function Counter() {
+  // Each hook subscribes to one specific field
+  const count = CounterStore.use.count()       // re-renders when count changes
+  const doubled = CounterStore.use.doubled()   // re-renders when doubled changes
+  // ...
+}
+```
+
+Each `use.*` hook subscribes to a single field. If `multiplier` changes but `count` doesn't, a component that only reads `count` won't re-render. This granularity is built in — no selector functions needed for basic field access.
+
+For derived values that combine multiple fields, use `useSelector`:
+
+```tsx
+function Summary() {
+  const summary = CounterStore.useSelector(
+    (state) => `${state.count} x ${state.multiplier} = ${state.product}`
+  )
+  // ...
+}
+```
+
+## The full picture
+
+Here is a complete trace of clicking "+1" in the counter example:
+
+```
+User clicks "+1" button
+  → onClick calls CounterStore.send.plusButtonClicked({ amount: 1 })
+    → Store resolves: plusButtonClicked maps to IncrementCommand
+      → Store finds IncrementExecutor for IncrementCommand
+        → IncrementExecutor calls emit(CounterEvent.incremented({ amount: 1 }))
+          → Store.on[CounterEvent.incremented.type] runs:
+            state { count: 0, multiplier: 2 } → state { count: 1, multiplier: 2 }
+            → Computed recalculates: doubled = 2, product = 2
+              → useSyncExternalStore triggers re-render
+                → UI shows Count: 1, Doubled: 2, Product: 2
+```
+
+And here is the same trace for an async API call:
+
+```
+User clicks "Save" button
+  → onClick calls store.send.saveClicked({ id: '123', data: formData })
+    → Store resolves: saveClicked maps to SaveCommand
+      → Store finds SaveExecutor for SaveCommand
+        → SaveExecutor runs:
+          1. emit(ItemEvent.saveStarted({ id: '123' }))
+             → Store.on runs → state.saving = true → UI shows spinner
+          2. await deps.api.save('123', formData, { signal })
+          3. emit(ItemEvent.saveSucceeded({ id: '123', item: result }))
+             → Store.on runs → state.saving = false, state.item = result → UI shows result
+```
+
+**The pipeline is identical.** The only difference is what happens inside the executor. Everything before (Intent, Command resolution) and after (Store.on, Computed, Subscribers) is the same.
+
+This is the core promise of Hurum: one path, every time.

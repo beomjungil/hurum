@@ -1,0 +1,258 @@
+---
+title: "서버 사이드 렌더링"
+description: "Provider와 Store.create()로 Next.js 같은 SSR 프레임워크에서 Hurum을 사용해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 가이드는 [React 개요](/ko/react/overview/)와 [Provider](/ko/react/provider/)를 기반으로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Hurum은 Next.js, Remix, Astro 같은 서버 사이드 렌더링 프레임워크와 함께 작동해요. 핵심 규칙: **서버에서 전역 싱글턴을 절대 사용하지 마세요.** `Store.create()`로 요청마다 새로운 Store 인스턴스를 생성하고, 컴포넌트를 `Provider`로 감싸세요.
+
+## 싱글턴이 서버에서 작동하지 않는 이유
+
+클라이언트에서 Hurum Store는 기본적으로 싱글턴이에요. Store를 한 번 정의하고 어디서든 import해요. 각 사용자가 자체 브라우저 탭을 가지는 SPA에서는 편리해요.
+
+서버에서는 여러 사용자가 동일한 Node.js 프로세스를 공유해요. 전역 싱글턴은 요청 간에 상태가 새어나가요. 사용자 A의 데이터가 사용자 B의 응답에 섞일 수 있어요.
+
+Hurum은 개발 환경에서 서버에서 싱글턴에 접근하려 하면 경고해요:
+
+```
+[hurum] Singleton store accessed on the server. Use Store.create() with Provider instead.
+```
+
+## SSR 패턴
+
+패턴은 다음과 같아요:
+1. 서버 컴포넌트: 데이터를 fetch하고, Store 인스턴스를 생성하고, Provider에 전달
+2. 클라이언트 컴포넌트: `useStore()`로 Store를 읽고 상호작용
+
+### Next.js App Router
+
+```tsx
+// app/purchase/[id]/page.tsx — Server Component
+import { PurchaseStore } from './store'
+import { PurchaseClient } from './client'
+import { CurrencyService } from '@/services/currency'
+import { fetchPurchase } from '@/api/purchases'
+
+export default async function PurchasePage({
+  params,
+}: {
+  params: { id: string }
+}) {
+  const purchase = await fetchPurchase(params.id)
+
+  return (
+    <PurchaseStore.Provider
+      store={PurchaseStore.create({
+        initialState: {
+          purchase,
+          loading: false,
+          saving: false,
+          error: null,
+        },
+        deps: {
+          purchaseRepository: new HttpPurchaseRepository(),
+          currencyService: new CurrencyService(),
+        },
+      })}
+    >
+      <PurchaseClient />
+    </PurchaseStore.Provider>
+  )
+}
+```
+
+```tsx
+// app/purchase/[id]/client.tsx — Client Component
+'use client'
+
+import { useStore } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+export function PurchaseClient() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h1>{purchase?.name}</h1>
+      <button
+        onClick={() => store.send.saveClicked({ purchase: purchase! })}
+        disabled={saving}
+      >
+        {saving ? 'Saving...' : 'Save'}
+      </button>
+    </div>
+  )
+}
+```
+
+서버가 데이터를 fetch하고 Store를 미리 채워요. 클라이언트 컴포넌트는 그 상태를 받아 정상적으로 상호작용할 수 있어요.
+
+### Store 정의
+
+Store 정의 자체는 서버와 클라이언트 간에 공유돼요. 어떤 상태도 보유하지 않아요:
+
+```ts
+// app/purchase/[id]/store.ts
+import { Store, Events, Event, CommandExecutor, Intents, Intent } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+export const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    loading: true,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor)
+  .deps<{
+    purchaseRepository: PurchaseRepository
+    currencyService: CurrencyService
+  }>()
+```
+
+`Store()` 호출은 정의(설계도)를 생성해요. `.create()`를 호출하기 전까지는 상태를 가지지 않아요.
+
+## Store.create() 옵션
+
+### initialState (딥 머지)
+
+`initialState`는 Store의 기본 상태와 딥 머지돼요. 다른 필드만 제공하면 돼요:
+
+```ts
+// Store default: { purchase: null, loading: true, saving: false, error: null }
+
+PurchaseStore.create({
+  initialState: {
+    purchase: fetchedPurchase,
+    loading: false,
+  },
+})
+// Result: { purchase: fetchedPurchase, loading: false, saving: false, error: null }
+```
+
+지정하지 않은 필드는 기본값을 유지해요.
+
+### deps (얕은 머지)
+
+`deps`는 얕은 머지돼요. 각 키가 기본값을 완전히 대체해요:
+
+```ts
+PurchaseStore.create({
+  deps: {
+    purchaseRepository: new HttpPurchaseRepository('/api/v2'),
+    currencyService: new CurrencyService('EUR'),
+  },
+})
+```
+
+## Provider는 자동 dispose하지 않아요
+
+`Provider` 컴포넌트는 언마운트될 때 Store를 **자동으로 dispose하지 않아요**. 이것은 React Strict Mode 호환성을 위해 의도된 거예요. 개발 환경에서 컴포넌트가 두 번 마운트/언마운트되기 때문이에요.
+
+정리가 필요하다면, Store를 명시적으로 dispose하세요:
+
+```tsx
+function PurchasePage() {
+  const storeRef = useRef(
+    PurchaseStore.create({
+      initialState: { ... },
+      deps: { ... },
+    })
+  )
+
+  useEffect(() => {
+    return () => {
+      storeRef.current.dispose()
+    }
+  }, [])
+
+  return (
+    <PurchaseStore.Provider store={storeRef.current}>
+      <PurchaseClient />
+    </PurchaseStore.Provider>
+  )
+}
+```
+
+서버에서 생성된 Store(서버 컴포넌트에서 props로 전달된)의 경우, 페이지의 수명 동안 Store가 유지되므로 dispose가 필요하지 않아요.
+
+## 한 페이지에 여러 Store
+
+각 Store는 자체 Provider를 가져요. 서로 독립적이에요:
+
+```tsx
+export default async function Dashboard() {
+  const purchases = await fetchRecentPurchases()
+  const stats = await fetchStats()
+
+  return (
+    <PurchaseListStore.Provider
+      store={PurchaseListStore.create({ initialState: { purchases } })}
+    >
+      <StatsStore.Provider
+        store={StatsStore.create({ initialState: { stats } })}
+      >
+        <DashboardClient />
+      </StatsStore.Provider>
+    </PurchaseListStore.Provider>
+  )
+}
+```
+
+## 핵심 포인트
+
+- **SSR에는 항상 `Store.create()`를 사용하세요.** 서버에서 전역 싱글턴에 절대 접근하지 마세요.
+- **`initialState`는 딥 머지돼요.** Store 기본값과 병합돼요. 오버라이드할 필드만 제공하면 돼요.
+- **`deps`는 얕은 머지돼요.** 기본값과 병합돼요. 각 키가 이전 값을 완전히 대체해요.
+- **Provider는 자동 dispose하지 않아요.** Strict Mode 호환성을 위한 설계예요.
+- **Store 정의는 공유해도 안전해요.** `Store()` 빌더는 상태를 가지지 않아요. `.create()`만이 상태를 가진 인스턴스를 생성해요.
+- **Store 타입마다 하나의 Provider예요.** 한 페이지에 여러 Store가 필요하면 중첩해요.

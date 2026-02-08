@@ -1,0 +1,133 @@
+---
+title: StoreProvider
+description: "StoreProvider 컴포넌트의 API 레퍼런스예요."
+---
+
+```tsx
+import { StoreProvider } from '@hurum/react'
+```
+
+## `StoreProvider`
+
+컴포넌트 트리에 스코프된 Store 인스턴스를 공급하는 React 컨텍스트 Provider예요. `StoreProvider` 내부에서 `useStore()`를 호출하면 글로벌 싱글턴 대신 제공된 인스턴스를 반환해요.
+
+### Props
+
+| Prop | 타입 | 설명 |
+|------|------|-------------|
+| `of` | `StoreDefinition` | 제공할 Store 정의. |
+| `store` | `StoreInstance` | _(선택)_ 제공할 기존 Store 인스턴스. 생략하면 자동 생성돼요. |
+| `initialState` | `Partial<State>` | _(선택)_ 자동 생성 시 초기 상태 오버라이드. `store`가 제공되면 무시돼요. |
+| `deps` | `Deps` | _(선택)_ 자동 생성 시 의존성. `store`가 제공되면 무시돼요. |
+| `children` | `ReactNode` | 자식 컴포넌트 트리. |
+
+### Import
+
+```ts
+import { StoreProvider } from '@hurum/react'
+```
+
+### 예제 -- 기존 인스턴스 제공
+
+```tsx
+function App() {
+  const store = useMemo(() => CartStore.create({
+    deps: { repo: new CartRepo() },
+  }), [])
+
+  return (
+    <StoreProvider of={CartStore} store={store}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+
+function CartPage() {
+  // 싱글턴이 아닌 스코프된 인스턴스에서 읽습니다
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  // ...
+}
+```
+
+### 예제 -- 기본값으로 자동 생성
+
+```tsx
+function App() {
+  return (
+    <StoreProvider of={CartStore}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+### 예제 -- 옵션으로 자동 생성
+
+```tsx
+function App() {
+  return (
+    <StoreProvider of={CartStore} initialState={{ items: savedItems }} deps={{ repo: new CartRepo() }}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+---
+
+## 생명주기
+
+**StoreProvider는 언마운트 시 Store를 자동으로 해제하지 않아요.** 이는 React Strict Mode 호환성을 위해 의도적이에요. 개발 모드에서 Strict Mode는 컴포넌트를 마운트, 언마운트, 재마운트해요. 첫 번째 언마운트에서 자동으로 해제하면 Store가 깨져요.
+
+직접 해제를 관리하세요:
+
+```tsx
+function App() {
+  const store = useMemo(() => CartStore.create(), [])
+
+  useEffect(() => {
+    return () => store.dispose()
+  }, [store])
+
+  return (
+    <StoreProvider of={CartStore} store={store}>
+      <CartPage />
+    </StoreProvider>
+  )
+}
+```
+
+---
+
+## 다중 Provider
+
+서로 다른 Store에 대해 또는 동일 Store의 다른 인스턴스로 여러 Provider를 중첩할 수 있어요:
+
+```tsx
+function App() {
+  const mainCart = useMemo(() => CartStore.create(), [])
+  const savedCart = useMemo(() => CartStore.create({
+    initialState: { items: savedItems },
+  }), [])
+
+  return (
+    <StoreProvider of={CartStore} store={mainCart}>
+      <MainPage />
+      <StoreProvider of={CartStore} store={savedCart}>
+        <SavedCartSidebar />
+      </StoreProvider>
+    </StoreProvider>
+  )
+}
+```
+
+가장 가까운 `StoreProvider`가 우선해요. `SavedCartSidebar`는 `savedCart`에서, `MainPage`는 `mainCart`에서 읽어요.
+
+---
+
+## 참고사항
+
+- `StoreProvider`는 내부적으로 React 컨텍스트를 사용해요. 각 `StoreDefinition`은 자체 컨텍스트를 가지므로 서로 다른 Store의 Provider가 간섭하지 않아요.
+- `store`로 기존 인스턴스를 제공할 때는 렌더링 전에 생성해야 해요. 매 렌더링마다 새 인스턴스가 생성되지 않도록 `useMemo` 또는 `useState`를 사용하세요.
+- 항상 새로운 Store 인스턴스를 원하는 간단한 경우에는 [`withProvider`](/ko/api/react/with-provider/)를 대신 사용하세요.

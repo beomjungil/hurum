@@ -1,0 +1,220 @@
+---
+title: "빠른 시작"
+description: "5분 안에 Hurum으로 카운터를 만들어보세요. 실전 예제로 Intent → Command → Executor → Event → Store.on 전체 파이프라인을 배워요."
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+카운터를 만들어볼게요. 가장 단순한 예제이지만, **전체 Hurum 파이프라인**을 거쳐요 -- 복잡한 비동기 결제 흐름에서도 사용하는 바로 그 파이프라인이에요.
+
+## 카운터, 단계별로
+
+<Steps>
+
+1. **Event 정의 -- 무엇이 일어날 수 있는가**
+
+    Event는 **이미 일어난 일**을 기록해요 -- 과거 시제로 생각하세요. '카운터를 증가시켜' 가 아니라 '카운터가 증가되었다'예요. 이 구분이 중요해요: Event는 명령이 아니라 사실이에요.
+
+    ```ts title="counter/events.ts"
+    import { Events, Event } from '@hurum/core'
+
+    export const CounterEvent = Events('Counter', {
+      incremented: Event<{ amount: number }>(),
+      decremented: Event<{ amount: number }>(),
+      reset: Event<{}>(),
+    })
+    ```
+
+    `Events('Counter', { ... })`는 네임스페이스 그룹을 생성해요. 각 Event는 타입이 지정된 페이로드를 가져요 -- `incremented`는 `{ amount: number }`를 전달하고, `reset`은 아무것도 전달하지 않아요.
+
+2. **CommandExecutor 정의 -- 어떻게 일어나는가**
+
+    CommandExecutor는 사이드 이펙트가 사는 곳이에요 -- API 호출, localStorage, 타이머 같이 외부 세계와 소통하는 모든 것이요. `CommandExecutor` 호출은 `[Command, Executor]` 튜플을 반환해요: Command는 Intent가 사용하는 참조 토큰이고, Executor는 실제 일을 하는 함수예요.
+
+    ```ts title="counter/executors.ts"
+    import { CommandExecutor } from '@hurum/core'
+    import { CounterEvent } from './events'
+
+    export const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+      { amount: number }
+    >((command, { emit }) => {
+      emit(CounterEvent.incremented(command))
+    })
+
+    export const [DecrementCommand, DecrementExecutor] = CommandExecutor<
+      { amount: number }
+    >((command, { emit }) => {
+      emit(CounterEvent.decremented(command))
+    })
+
+    export const [ResetCommand, ResetExecutor] = CommandExecutor<
+      {}
+    >((command, { emit }) => {
+      emit(CounterEvent.reset(command))
+    })
+    ```
+
+    각 `CommandExecutor` 호출은 `[Command, Executor]` 튜플을 반환해요. executor는 Command 페이로드와 컨텍스트 객체를 받아요 -- 여기서는 `emit`만 사용하지만, 실제 executor는 `deps`, `getState`, `signal`, `scope`도 사용해요.
+
+3. **Intent 정의 -- 사용자가 하고 싶은 것**
+
+    Intent는 선언적 매핑이에요: '사용자가 X를 하면, 커맨드 Y와 Z를 실행해.' Intent는 **사용자가 한 일**(버튼 클릭, 폼 제출)을 설명하지, 시스템이 할 일을 설명하지 않아요. 이 네이밍 규칙이 코드를 자체 문서화해줘요.
+
+    ```ts title="counter/intents.ts"
+    import { Intents, Intent } from '@hurum/core'
+    import { IncrementCommand, DecrementCommand, ResetCommand } from './executors'
+
+    export const CounterIntents = Intents('Counter', {
+      plusButtonClicked: Intent(IncrementCommand),
+      minusButtonClicked: Intent(DecrementCommand),
+      resetButtonClicked: Intent(ResetCommand),
+    })
+    ```
+
+    이름에 주목하세요: `increment`가 아니라 `plusButtonClicked`예요. Intent는 시스템이 해야 할 일이 아니라 **사용자가 한 일**을 설명해요. 이 구분은 하나의 사용자 액션이 여러 Command를 트리거할 때 중요해져요.
+
+4. **Store 정의 -- 상태 + 전이 + 모든 것**
+
+    Store는 중심 단위예요. 초기 상태, `.on()` 핸들러(이벤트에 반응하는 순수 함수), `.computed()` 값(파생 상태), 그리고 위에서 정의한 intent와 executor를 하나로 엮어요.
+
+    ```ts title="counter/store.ts"
+    import { Store } from '@hurum/core'
+    import { CounterEvent } from './events'
+    import { CounterIntents } from './intents'
+    import { IncrementExecutor, DecrementExecutor, ResetExecutor } from './executors'
+
+    export const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+      .on(CounterEvent, {
+        incremented: (state, { amount }) => ({
+          ...state,
+          count: state.count + amount,
+        }),
+        decremented: (state, { amount }) => ({
+          ...state,
+          count: state.count - amount,
+        }),
+        reset: (state) => ({
+          ...state,
+          count: 0,
+        }),
+      })
+      .computed({
+        doubled: (state) => state.count * 2,
+        product: (state) => state.count * state.multiplier,
+      })
+      .intents(CounterIntents)
+      .executors(IncrementExecutor, DecrementExecutor, ResetExecutor)
+    ```
+
+    `.on()` 핸들러는 순수 함수예요: `(state, payload) => newState`. 사이드 이펙트 없음.
+    `.computed()` 값은 상태에서 파생되며 의존하는 값이 변경되면 즉시 재계산돼요.
+
+5. **React에서 사용 -- 상태 읽기와 Intent 보내기**
+
+    `@hurum/react`에서 `useStore`를 import한 후, 컴포넌트에서 `store.use.*` 훅을 사용하세요.
+
+    ```tsx title="counter/Counter.tsx"
+    import { useStore } from '@hurum/react'
+    import { CounterStore } from './store'
+    import { CounterIntents } from './intents'
+
+    function Counter() {
+      const store = useStore(CounterStore)
+      const count = store.use.count()
+      const doubled = store.use.doubled()
+      const product = store.use.product()
+
+      return (
+        <div>
+          <p>Count: {count}</p>
+          <p>Doubled: {doubled}</p>
+          <p>Product: {product}</p>
+          <button onClick={() => store.send.plusButtonClicked({ amount: 1 })}>
+            +1
+          </button>
+          <button onClick={() => store.send.minusButtonClicked({ amount: 1 })}>
+            -1
+          </button>
+          <button onClick={() => store.send.resetButtonClicked({})}>
+            Reset
+          </button>
+        </div>
+      )
+    }
+    ```
+
+    `store.use.count()`는 `count` 필드만 구독해요 -- `multiplier`가 변경되어도 `count`가 변경되지 않으면 이 컴포넌트는 리렌더되지 않아요. 각 `use.*` 훅은 기본적으로 세분화(granular)되어 있어요.
+
+    `store.send.plusButtonClicked({ amount: 1 })`는 `store.send(CounterIntents.plusButtonClicked({ amount: 1 }))`의 축약형이에요. 둘 다 동작해요 -- 선호하는 방식을 사용하세요.
+
+6. **스코프 인스턴스를 위한 Provider (선택)**
+
+    기본적으로 Provider 외부에서 `useStore(CounterStore)`는 **전역 싱글턴**에서 동작해요. 독립적인 여러 인스턴스가 필요하다면 (예: 같은 페이지에 두 개의 카운터), `StoreProvider`를 사용하세요:
+
+    ```tsx title="counter/ScopedCounter.tsx"
+    import { useStore, StoreProvider } from '@hurum/react'
+    import { CounterStore } from './store'
+
+    function ScopedCounter() {
+      const store = useStore(CounterStore)
+      const count = store.use.count()
+
+      return (
+        <div>
+          <p>Count: {count}</p>
+          <button onClick={() => store.send.plusButtonClicked({ amount: 1 })}>
+            +1
+          </button>
+        </div>
+      )
+    }
+
+    // 각 StoreProvider는 독립적인 Store 인스턴스를 가집니다
+    function App() {
+      const storeA = CounterStore.create()
+      const storeB = CounterStore.create()
+
+      return (
+        <>
+          <StoreProvider of={CounterStore} store={storeA}>
+            <ScopedCounter />
+          </StoreProvider>
+          <StoreProvider of={CounterStore} store={storeB}>
+            <ScopedCounter />
+          </StoreProvider>
+        </>
+      )
+    }
+    ```
+
+    `StoreProvider` 내부에서 `useStore(CounterStore)`는 스코프된 인스턴스를 반환해요. Provider 외부에서는 전역 싱글턴으로 폴백해요.
+
+</Steps>
+
+## 무슨 일이 일어났나?
+
+"+1"을 클릭했을 때 실행된 정확한 순서예요:
+
+```
+1. onClick → store.send.plusButtonClicked({ amount: 1 })
+2. Intent maps to IncrementCommand → Store matches IncrementExecutor
+3. IncrementExecutor runs → emit(CounterEvent.incremented({ amount: 1 }))
+4. Store.on[CounterEvent.incremented.type] runs → state becomes { count: 1, multiplier: 2 }
+5. Computed recalculates: doubled = 2, product = 2
+6. React subscribers notified → component re-renders
+```
+
+모든 상태 변경이 거치는 같은 경로예요. 비동기 작업의 경우, 유일한 차이점은 executor 내부에서 일어나는 일뿐이에요 -- 나머지 파이프라인은 동일해요.
+
+<Aside type="tip">
+  카운터 executor는 `emit`만 호출해요 — 실제 사이드 이펙트가 없기 때문이에요. 실제 애플리케이션에서는 executor가 API 호출, localStorage 접근, 검증 등을 수행하며 — 모두 컨텍스트 객체의 `deps`, `getState`, `signal`을 사용해요. 복잡도와 관계없이 파이프라인은 동일하게 유지돼요.
+</Aside>
+
+## 다음 단계
+
+파이프라인의 동작을 확인했으니, 각 구성 요소가 어떻게 작동하는지 자세히 알아보세요:
+
+- [데이터 흐름](/ko/getting-started/data-flow/) -- 파이프라인의 모든 단계 심층 분석
+- [Event](/ko/concepts/event/) -- Event의 동작 방식과 왜 사실인가
+- [CommandExecutor](/ko/concepts/command-executor/) -- 사이드 이펙트 경계
+- [Store](/ko/concepts/store/) -- 상태, 전이, Computed, 빌더 API

@@ -1,0 +1,202 @@
+---
+title: "useStore"
+description: "컴포넌트에 적합한 store 인스턴스를 찾아주는 context 인식 hook이에요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## useStore가 존재하는 이유
+
+`useStore()`는 `@hurum/react`의 핵심 hook이에요. Store 정의를 받아 적합한 인스턴스를 자동으로 찾아줘요. `StoreProvider` 내부에서는 스코프된 인스턴스를, 외부에서는 전역 싱글턴을 반환해요. 어떤 context에서 실행되든 컴포넌트 코드는 동일하게 유지돼요.
+
+```tsx
+import { useStore } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+function PurchaseInfo() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h2>{purchase?.name}</h2>
+      {saving && <p>Saving...</p>}
+    </div>
+  )
+}
+```
+
+이 컴포넌트는 `StoreProvider` 내부(스코프된 인스턴스 읽기)와 외부(싱글턴 읽기) 모두에서 작동해요. 호출자가 어떤 context를 제공할지 결정하며, 컴포넌트는 신경 쓰지 않아요.
+
+## 두 가지 오버로드
+
+`useStore`는 두 가지 방식으로 호출할 수 있어요.
+
+### useStore(definition) — context 인식
+
+Store 정의를 전달하면, `useStore`는 컴포넌트 트리에서 해당 Store의 `StoreProvider`를 찾아요:
+
+```tsx
+const store = useStore(PurchaseStore)
+```
+
+**해석 순서:**
+
+1. **StoreProvider 내부** — context에서 스코프된 인스턴스 반환
+2. **StoreProvider 외부** — 전역 싱글턴 반환 (첫 접근 시 생성)
+
+즉, 컴포넌트를 한 번 작성하면 두 context 모두에서 사용할 수 있어요:
+
+```tsx
+// 스코프: 각 폼이 자체 상태를 가짐
+<StoreProvider of={PurchaseStore} store={storeA}>
+  <PurchaseInfo />  {/* storeA를 읽음 */}
+</StoreProvider>
+
+// 싱글턴: 빠른 프로토타입, Provider 불필요
+<PurchaseInfo />  {/* 전역 싱글턴을 읽음 */}
+```
+
+### useStore(instance) — 인스턴스 직접 사용
+
+이미 생성된 `StoreInstance`를 직접 전달할 수도 있어요. 이 경우 context 해석을 건너뛰고 주어진 인스턴스를 그대로 사용해요:
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function ItemRow({ store: itemStore }: { store: StoreInstance }) {
+  const store = useStore(itemStore)
+  const name = store.use.name()
+  const price = store.use.price()
+
+  return (
+    <div>
+      <span>{name}</span>
+      <span>${price}</span>
+    </div>
+  )
+}
+```
+
+이 패턴은 주로 **Nested Store**에서 유용해요. 부모가 `scope`로 자식 인스턴스를 가져온 후, 자식 컴포넌트에 props로 전달해요:
+
+```tsx
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const itemStores = store.scope.items  // StoreInstance[]
+
+  return (
+    <ul>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+    </ul>
+  )
+}
+```
+
+`useStore(instance)`는 `StoreProvider`나 싱글턴 해석을 거치지 않으므로, 정확히 어떤 인스턴스를 사용할지 명시적으로 제어할 수 있어요.
+
+## 반환되는 핸들
+
+`useStore()`는 hook, dispatch, 그리고 전체 store API를 포함한 핸들을 반환해요:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `use` | `{ [field]: () => value }` | state와 computed 값에 대한 필드별 hook |
+| `useSelector(fn)` | `(fn) => T` | 구조적 동등성을 사용하는 파생 상태 |
+| `send` | `SendFn` | Intent 디스패치 |
+| `cancel(ref)` | `(ref) => void` | 실행 중인 특정 intent 취소 |
+| `cancelAll()` | `() => void` | 실행 중인 모든 intent 취소 |
+| `getState()` | `() => State` | 현재 전체 상태 읽기 |
+| `subscribe(cb)` | `(cb) => unsubscribe` | 상태 변경 구독 |
+| `dispose()` | `() => void` | store 인스턴스 폐기 |
+| `scope` | `ScopeOf<State>` | nested된 자식 store 인스턴스 접근 |
+
+### use.fieldName()
+
+store 상태의 각 필드(computed 값 포함)는 고유한 hook을 가져요. 이 hook은 해당 필드만 구독해요. 다른 필드의 변경은 리렌더링을 트리거하지 않아요.
+
+```tsx
+function CounterDisplay() {
+  const store = useStore(CounterStore)
+  const count = store.use.count()       // count 변경 시 리렌더링
+  const doubled = store.use.doubled()   // doubled 변경 시 리렌더링
+  // multiplier 변경 시에는 리렌더링 안 됨
+
+  return <p>{count} (doubled: {doubled})</p>
+}
+```
+
+이런 세밀함은 내장되어 있어요. 기본적인 필드 접근을 위해 selector 함수를 작성할 필요가 없어요.
+
+### useSelector
+
+여러 필드를 결합하는 파생 상태의 경우, `useSelector`는 반환 값을 구조적으로 비교해서 불필요한 리렌더링을 방지해요:
+
+```tsx
+function PurchaseSummary() {
+  const store = useStore(PurchaseStore)
+
+  const summary = store.useSelector((state) => ({
+    name: state.purchase?.name,
+    total: state.totalAmount,
+    itemCount: state.purchase?.items.length ?? 0,
+  }))
+
+  // name, total, itemCount가 실제로 변경될 때만 리렌더링
+  return (
+    <div>
+      <h3>{summary.name}</h3>
+      <p>{summary.itemCount} items, ${summary.total}</p>
+    </div>
+  )
+}
+```
+
+selector는 모든 상태 변경 시 실행되지만, 컴포넌트는 반환 값이 이전 값과 구조적으로 다를 때만 리렌더링돼요.
+
+### send
+
+세 가지 동등한 스타일로 intent를 디스패치해요:
+
+```tsx
+// Named shorthand
+store.send.submitClicked({ id: '123' })
+
+// PreparedIntent
+store.send(PurchaseIntents.submitClicked({ id: '123' }))
+
+// Descriptor + payload
+store.send(PurchaseIntents.submitClicked, { id: '123' })
+```
+
+### scope
+
+렌더링이나 위임을 위해 nested된 자식 store 인스턴스에 접근해요:
+
+```tsx
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const itemStores = store.scope.items  // Nested.array에 대한 StoreInstance[]
+
+  return (
+    <ul>
+      {itemStores.map((itemStore) => (
+        <ItemRow key={itemStore.getState().id} store={itemStore} />
+      ))}
+    </ul>
+  )
+}
+```
+
+<Aside type="caution">
+  `useStore()`는 hook이에요. [Rules of Hooks](https://react.dev/reference/rules/rules-of-hooks)를 따르세요. 컴포넌트 최상위에서 호출하고, 조건문이나 반복문 내부에서 호출하지 마세요.
+</Aside>
+
+## 다음 단계
+
+- [싱글턴 폴백](/ko/react/static-api/) — Provider 없이 전역 상태로 사용하는 방법
+- [Provider & withProvider](/ko/react/provider/) — 스코프된 인스턴스 생성과 필요한 이유
+- [Scoped Instances](/ko/react/scoped-instances/) — Store.create(), 폐기, 그리고 SSR

@@ -1,0 +1,145 @@
+---
+title: Command / CommandExecutor
+description: CommandExecutor는 모든 사이드 이펙트의 명시적 경계예요. 무엇을 실행할지와 어떻게 실행할지를 하나로 묶어요.
+---
+
+CommandExecutor는 Command(무엇을 실행할지)와 Executor(어떻게 실행할지)를 하나의 정의로 묶는 거예요. Hurum에서 사이드 이펙트가 존재하는 **유일한** 장소예요.
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },          // input type
+  { repository: PurchaseRepository }, // deps type
+  { purchase: Purchase | null }    // state slice type
+>(async (command, { deps, emit, getState, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+
+  if (signal.aborted) return
+
+  const result = await deps.repository.save(command.purchase)
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+## 타입 파라미터
+
+`CommandExecutor`는 최대 세 개의 제네릭 파라미터를 받아요:
+
+```ts
+CommandExecutor<InputType, DepsType, ScopeType>
+```
+
+| 파라미터 | 필수 | 용도 |
+|-----------|----------|---------|
+| `InputType` | 예 | 커맨드 페이로드 타입. executor가 받는 데이터를 정의해요. |
+| `DepsType` | 아니오 | 의존성 타입. executor가 `deps`로 사용할 수 있는 서비스(API 클라이언트, 리포지토리)를 정의해요. 기본값 `{}`. |
+| `ScopeType` | 아니오 | Nested store 접근을 위한 scope 타입. Store에 nested 자식이 있으면 executor가 `scope`으로 자식 store에 접근할 수 있어요. `getState()` 반환값의 타입도 결정해요. 기본값 `{}`. |
+
+세 번째 파라미터는 executor가 `getState()`로 상태를 읽거나 `scope`으로 nested 자식 store에 접근할 때만 필요해요. 단순한 executor는 생략해도 돼요.
+
+## 동작 방식
+
+`CommandExecutor`는 `[Command, Executor]` 튜플을 반환해요. Command는 [Intent](/ko/concepts/intent/)에 전달하는 것이고, Executor는 [Store](/ko/concepts/store/)에 등록하는 거예요. 이 둘을 따로 정의할 필요가 없어요 -- 타입은 Executor 함수에서 추론돼요.
+
+Executor 함수는 두 개의 인자를 받아요:
+
+1. **`command`** -- 입력 페이로드, 첫 번째 제네릭 파라미터로 타입 지정
+2. **`context`** -- 다섯 개의 프로퍼티를 가진 실행 컨텍스트:
+
+| 프로퍼티 | 설명 |
+|----------|-------------|
+| `deps` | Store에서 주입된 의존성 (API 클라이언트, 리포지토리 등) |
+| `emit(event)` | Event를 emit해요. **동기적** -- Store의 `.on` 핸들러가 `emit`이 반환되기 전에 즉시 실행돼요. |
+| `getState()` | 현재 상태를 읽어요. `emit` 이후의 최신 상태를 항상 반영해요. |
+| `signal` | 취소를 위한 `AbortSignal`. 비동기 경계 전에 `signal.aborted`를 확인하세요. |
+| `scope` | 위임을 위한 [Nested 자식 Store](/ko/concepts/nested-store/) 접근. |
+
+### emit은 동기적이에요
+
+이건 핵심 설계 결정이에요. `emit(SomeEvent(...))`을 호출하면, Store의 `.on` 핸들러가 **즉시** 실행되고, 상태가 업데이트되며, Computed 값이 재계산돼요 -- 모두 `emit`이 반환되기 전에 일어나요. 따라서 `emit()` 직후의 `getState()`는 항상 업데이트된 상태를 반영해요:
+
+```ts
+const [LoadCommand, LoadExecutor] = CommandExecutor<
+  { id: string },
+  { api: Api },
+  { loading: boolean; data: Item | null }
+>(async (command, { deps, emit, getState }) => {
+  emit(ItemEvent.loadStarted({ id: command.id }))
+
+  // getState() already reflects the loadStarted transition
+  console.log(getState().loading) // true
+
+  const item = await deps.api.fetchItem(command.id)
+  emit(ItemEvent.loaded({ item }))
+})
+```
+
+## 자주 사용되는 패턴
+
+### 로딩 상태가 있는 비동기 작업
+
+```ts
+const [FetchUsersCommand, FetchUsersExecutor] = CommandExecutor<
+  { page: number },
+  { api: UserApi },
+  { loading: boolean; users: User[] }
+>(async (command, { deps, emit, signal }) => {
+  emit(UserEvent.fetchStarted({ page: command.page }))
+
+  try {
+    const users = await deps.api.getUsers(command.page, { signal })
+    emit(UserEvent.fetched({ users }))
+  } catch (error) {
+    if (!signal.aborted) {
+      emit(UserEvent.fetchFailed({ error: toAppError(error) }))
+    }
+  }
+})
+```
+
+### 진행 전 상태 확인
+
+```ts
+const [SubmitCommand, SubmitExecutor] = CommandExecutor<
+  { formData: FormData },
+  { api: Api },
+  { submitting: boolean }
+>(async (command, { deps, emit, getState }) => {
+  if (getState().submitting) return  // already submitting, skip
+
+  emit(FormEvent.submitStarted({}))
+  const result = await deps.api.submit(command.formData)
+  emit(FormEvent.submitted({ result }))
+})
+```
+
+### 취소 처리
+
+```ts
+const [SearchCommand, SearchExecutor] = CommandExecutor<
+  { query: string },
+  { api: SearchApi },
+  { results: SearchResult[] }
+>(async (command, { deps, emit, signal }) => {
+  emit(SearchEvent.searching({ query: command.query }))
+
+  // Pass signal to fetch so it aborts the network request
+  const results = await deps.api.search(command.query, { signal })
+
+  // Check after await -- another intent may have cancelled us
+  if (signal.aborted) return
+
+  emit(SearchEvent.resultsReceived({ results }))
+})
+```
+
+## 팁
+
+- **하나의 Executor, 하나의 관심사.** 각 CommandExecutor는 하나의 논리적 작업을 처리해야 해요. 관련 없는 Event를 많이 emit하고 있다면, 여러 Executor로 분리하세요.
+- **`await` 뒤에서는 항상 `signal.aborted`를 확인하세요.** 대기 중에 Intent가 취소됐을 수 있어요. 취소 후 Event를 emit해도 해가 되지 않지만 (조용히 무시됨), 불필요한 작업을 건너뛰는 게 더 깔끔해요.
+- **일찍 emit하고, 자주 emit하세요.** 비동기 작업 전에 "started" Event를 emit해서 UI가 즉시 로딩 상태를 보여줄 수 있게 하세요. 성공/실패 Event를 분리해서 Store가 각 경우를 깔끔하게 처리할 수 있게 하세요.
+

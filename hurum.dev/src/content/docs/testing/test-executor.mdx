@@ -1,0 +1,190 @@
+---
+title: "TestExecutor"
+description: "Unit test individual executors in isolation."
+---
+
+`TestExecutor` runs an executor function in isolation with a mock context. You provide deps and state, run the executor, and assert which events were emitted.
+
+## Setup
+
+```ts
+import { TestExecutor } from '@hurum/core/testing'
+import { SaveExecutor } from './executors'
+import { PurchaseEvent } from './events'
+
+const mockRepo = {
+  save: vi.fn().mockResolvedValue(savedPurchase),
+}
+
+const executor = TestExecutor(SaveExecutor, {
+  deps: { repository: mockRepo },
+  state: { purchase: null, saving: false },
+})
+```
+
+### Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `deps` | `Record<string, unknown>` | Mock dependencies injected as `context.deps` |
+| `state` | `Record<string, unknown>` | Static state returned by `context.getState()` |
+
+Both are optional. Without them, `deps` defaults to `{}` and `state` defaults to `{}`.
+
+> [!NOTE]
+> The `state` in TestExecutor is static -- it doesn't change when events are emitted. TestExecutor captures events but doesn't run reducers. If your executor calls `getState()` after `emit()` and expects updated state, use [TestStore](/testing/test-store/) instead.
+
+## run
+
+Execute the executor with the given input:
+
+```ts
+await executor.run({ id: '123', purchase: mockPurchase })
+```
+
+`run()` returns a Promise that resolves when the executor function completes (including any async work).
+
+## assertEmitted
+
+Verify the exact events emitted during execution, in order:
+
+```ts
+await executor.run({ id: '123' })
+
+executor.assertEmitted([
+  PurchaseEvent.saveRequested({ id: '123' }),
+  PurchaseEvent.saved({ purchase: savedPurchase }),
+])
+```
+
+Uses structural equality for comparison. Both event types and payloads must match exactly.
+
+If there is a mismatch:
+
+```
+Emitted event mismatch at index 1:
+  Expected: {"type":"Purchase/saved","purchase":{"id":"123"}}
+  Received: {"type":"Purchase/saveFailed","error":"Network error"}
+```
+
+## emittedEvents
+
+Direct access to the captured events array, for custom assertions:
+
+```ts
+await executor.run({ id: '123' })
+
+expect(executor.emittedEvents).toHaveLength(2)
+expect(executor.emittedEvents[0]!.type).toBe('Purchase/saveRequested')
+```
+
+## abort
+
+Signal cancellation via the AbortSignal:
+
+```ts
+const executor = TestExecutor(SearchExecutor, {
+  deps: { api: mockApi },
+})
+
+executor.abort()
+await executor.run({ query: 'test' })
+
+// Executor should check signal.aborted and skip work
+expect(mockApi.search).not.toHaveBeenCalled()
+```
+
+Call `abort()` before `run()` to simulate a pre-cancelled state. This tests whether your executor properly respects the abort signal.
+
+## Common patterns
+
+### Testing error handling
+
+```ts
+it('emits saveFailed on error', async () => {
+  const mockRepo = { save: vi.fn().mockRejectedValue(new Error('Timeout')) }
+  const executor = TestExecutor(SaveExecutor, {
+    deps: { repository: mockRepo },
+  })
+
+  await executor.run({ purchase: mockPurchase })
+
+  executor.assertEmitted([
+    PurchaseEvent.saveRequested({ id: '123' }),
+    PurchaseEvent.saveFailed({ error: 'Timeout' }),
+  ])
+})
+```
+
+### Testing conditional logic
+
+```ts
+it('skips save when already saving', async () => {
+  const executor = TestExecutor(SaveExecutor, {
+    deps: { repository: mockRepo },
+    state: { saving: true },
+  })
+
+  await executor.run({ purchase: mockPurchase })
+
+  // Executor checks getState().saving and returns early
+  executor.assertEmitted([])
+})
+```
+
+## Full example
+
+```ts title="save-executor.test.ts"
+import { describe, it, expect, vi } from 'vitest'
+import { TestExecutor } from '@hurum/core/testing'
+import { SaveExecutor } from './executors'
+import { PurchaseEvent } from './events'
+
+describe('SaveExecutor', () => {
+  const mockPurchase = { id: '123', name: 'Widget' }
+
+  it('emits saveRequested then saved on success', async () => {
+    const savedPurchase = { ...mockPurchase, savedAt: '2026-01-01' }
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn().mockResolvedValue(savedPurchase) } },
+    })
+
+    await executor.run({ purchase: mockPurchase })
+
+    executor.assertEmitted([
+      PurchaseEvent.saveRequested({ id: '123' }),
+      PurchaseEvent.saved({ purchase: savedPurchase }),
+    ])
+  })
+
+  it('emits saveFailed on rejection', async () => {
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn().mockRejectedValue(new Error('fail')) } },
+    })
+
+    await executor.run({ purchase: mockPurchase })
+
+    executor.assertEmitted([
+      PurchaseEvent.saveRequested({ id: '123' }),
+      PurchaseEvent.saveFailed({ error: 'fail' }),
+    ])
+  })
+
+  it('does not emit after abort', async () => {
+    const executor = TestExecutor(SaveExecutor, {
+      deps: { repository: { save: vi.fn() } },
+    })
+
+    executor.abort()
+    await executor.run({ purchase: mockPurchase })
+
+    // Only the synchronous saveRequested before the first await
+    expect(executor.emittedEvents.length).toBeLessThanOrEqual(1)
+  })
+})
+```
+
+## Next steps
+
+- [TestReducer](/testing/test-reducer/) -- Test on() handlers as pure functions
+- [TestStore](/testing/test-store/) -- Full integration testing

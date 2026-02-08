@@ -1,0 +1,114 @@
+---
+title: "TestReducer"
+description: "on() 핸들러를 순수 함수로 테스트해요."
+---
+
+`TestReducer`는 Store 정의에서 `.on()` 핸들러를 추출하고, 상태에 직접 Event를 적용할 수 있게 해줘요. Executor 없이, Intent 없이, 사이드 이펙트 없이 -- 순수한 `(state, event) => newState` 테스트예요.
+
+## 설정
+
+```ts
+import { TestReducer } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseEvent } from './events'
+
+const reducer = TestReducer(PurchaseStore)
+```
+
+`TestReducer`는 Store 정의를 받아 단일 메서드 `apply`를 가진 객체를 반환해요.
+
+## apply
+
+상태에 Event를 적용하고 새 상태를 반환해요:
+
+```ts
+const initial = { purchase: null, saving: false, error: null }
+
+const next = reducer.apply(initial, PurchaseEvent.saveRequested({ id: '123' }))
+
+expect(next).toEqual({
+  purchase: null,
+  saving: true,
+  error: null,
+})
+```
+
+`apply` 메서드는:
+1. Event의 타입에 대한 `.on()` 핸들러를 찾아요
+2. `(state, payload)`로 호출해요 (payload는 `type` 필드가 제거된 Event)
+3. 새 상태를 반환해요
+
+해당 Event 타입에 대한 핸들러가 없으면, 원래 상태가 변경 없이 반환돼요 (동일 참조).
+
+## Event 체이닝
+
+`apply`는 새 상태를 반환하므로, 여러 Event를 체이닝해서 시퀀스를 테스트할 수 있어요:
+
+```ts
+const reducer = TestReducer(CounterStore)
+
+let state = { count: 0, multiplier: 2 }
+state = reducer.apply(state, CounterEvent.incremented({ amount: 3 }))
+state = reducer.apply(state, CounterEvent.incremented({ amount: 7 }))
+state = reducer.apply(state, CounterEvent.decremented({ amount: 2 }))
+
+expect(state.count).toBe(8)
+```
+
+일련의 Event가 예상된 누적 상태를 만드는지 테스트하는 데 유용해요.
+
+## 개별 핸들러 테스트
+
+제어된 입력으로 각 Event 핸들러를 독립적으로 테스트해요:
+
+```ts
+describe('PurchaseStore reducers', () => {
+  const reducer = TestReducer(PurchaseStore)
+  const initial = { purchase: null, saving: false, error: null }
+
+  it('saveRequested sets saving to true', () => {
+    const next = reducer.apply(initial, PurchaseEvent.saveRequested({ id: '123' }))
+    expect(next.saving).toBe(true)
+    expect(next.error).toBeNull()
+  })
+
+  it('saved stores the purchase and clears saving', () => {
+    const saving = { ...initial, saving: true }
+    const purchase = { id: '123', name: 'Widget' }
+
+    const next = reducer.apply(saving, PurchaseEvent.saved({ purchase }))
+
+    expect(next.saving).toBe(false)
+    expect(next.purchase).toEqual(purchase)
+  })
+
+  it('saveFailed stores the error and clears saving', () => {
+    const saving = { ...initial, saving: true }
+
+    const next = reducer.apply(saving, PurchaseEvent.saveFailed({ error: 'Network error' }))
+
+    expect(next.saving).toBe(false)
+    expect(next.error).toBe('Network error')
+  })
+
+  it('returns same state for unknown events', () => {
+    const next = reducer.apply(initial, { type: 'Unknown/event' })
+    expect(next).toBe(initial)  // same reference
+  })
+})
+```
+
+## 리듀서를 별도로 테스트하는 이유
+
+리듀서는 파이프라인에서 가장 간단한 부분이에요 -- 의존성이 없는 순수 함수. 직접 테스트하면 다음을 얻어요:
+
+- **빠른 피드백.** 비동기 없음, 설정 없음, 목 없음. 각 테스트가 마이크로초 단위로 실행돼요.
+- **철저한 커버리지.** 다양한 입력 조합으로 모든 Event 핸들러를 쉽게 테스트할 수 있어요.
+- **회귀 안전성.** 리듀서가 실수로 필드를 누락하면, 테스트가 즉시 잡아내요.
+
+전체 흐름 (Intent에서 최종 상태까지) 테스트에는 [TestStore](/ko/testing/test-store/)를 사용하세요.
+
+## 다음 단계
+
+- [TestComputed](/ko/testing/test-computed/) -- 특정 상태 입력으로 Computed 값 테스트
+- [TestExecutor](/ko/testing/test-executor/) -- 격리된 Executor 테스트

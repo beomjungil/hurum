@@ -1,0 +1,107 @@
+---
+title: "React Integration"
+description: "How @hurum/react connects framework-agnostic stores to React's rendering model."
+---
+
+## Why a separate package
+
+`@hurum/core` is framework-agnostic. It knows nothing about React, Vue, or any UI library. Stores expose a `subscribe()` + `getState()` interface — the standard contract for external state.
+
+`@hurum/react` bridges that interface to React. Specifically, it:
+
+1. **Prevents tearing.** React 18 can interrupt and resume renders (concurrent mode). Without `useSyncExternalStore`, two components reading from the same store could see different states within a single render pass. `@hurum/react` uses `useSyncExternalStore` for every subscription, so this never happens.
+
+2. **Provides granular subscriptions.** Hurum stores contain many fields. If your component only reads `count`, it should not re-render when `multiplier` changes. The `.use.count()` hook subscribes to exactly one field — structural equality per field, not the entire state object.
+
+3. **Manages store lifecycles.** Some stores are global (one per app). Others are scoped (one per page, one per list item, one per modal). `@hurum/react` provides both patterns: singleton fallback via `useStore(Def)` and scoped instances via `StoreProvider`.
+
+## Three exports
+
+`@hurum/react` provides three things:
+
+```tsx
+import { useStore, StoreProvider, withProvider } from '@hurum/react'
+```
+
+| Export | Description |
+|--------|-------------|
+| `useStore(Def)` | Context-aware hook: inside StoreProvider returns scoped instance, outside falls back to singleton |
+| `useStore(instance)` | Uses the given StoreInstance directly |
+| `StoreProvider` | React context Provider for scoped instances |
+| `withProvider(Def, Component)` | HOC that auto-creates a scoped instance on mount |
+
+No extra wrapping step is needed. You import the store definition from `@hurum/core` and use it directly with these APIs.
+
+## Two access patterns
+
+React apps need both global and scoped state. Hurum supports both without forcing you to choose one upfront.
+
+### Singleton fallback — global state
+
+For state that is truly app-wide (auth, theme, feature flags), you want one instance shared across all components. No Provider ceremony, no context plumbing. Simply call `useStore(Def)` outside of any `StoreProvider` and it falls back to the global singleton:
+
+```tsx
+import { useStore } from '@hurum/react'
+import { AuthStore } from './store'
+
+function UserMenu() {
+  const store = useStore(AuthStore)
+  const user = store.use.currentUser()
+  const loggedIn = store.use.isLoggedIn()  // computed
+
+  if (!loggedIn) return <LoginButton />
+  return <span>Hello, {user.name}</span>
+}
+```
+
+When there is no `StoreProvider` for `AuthStore` in the component tree, `useStore(AuthStore)` creates and returns a global singleton, lazily on first access. No setup required.
+
+### Context-aware — useStore + StoreProvider
+
+For state that is not global — a purchase form, a chart widget, a nested store with child items — you need independent instances. `StoreProvider` creates a scoped boundary; `useStore()` resolves the nearest instance.
+
+```tsx
+import { useStore, StoreProvider } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h2>{purchase?.name}</h2>
+      {saving && <p>Saving...</p>}
+      <button onClick={() => store.send.submitClicked({ purchase })}>
+        Submit
+      </button>
+    </div>
+  )
+}
+```
+
+`useStore()` checks for a `StoreProvider` in the component tree. If found, it returns the scoped instance. If not, it falls back to the global singleton. This means the same component works in both contexts — you decide the boundary from the outside.
+
+## When to use which
+
+| Scenario | Pattern | Why |
+|----------|---------|-----|
+| Auth, theme, feature flags | Singleton fallback | One instance per app. Never needs isolation. |
+| Page-level state with server data | StoreProvider + useStore | Each page needs its own initial state and deps. |
+| Reusable component (charts, forms, widgets) | StoreProvider + useStore | Same component, multiple independent instances. |
+| Nested stores (`Nested.array`, `Nested.map`) | StoreProvider + useStore | Parent and children need scoped lifecycle. |
+| SSR | StoreProvider + Store.create() | Server has no global. Each request = new instance. |
+| Quick prototype | Singleton fallback | Less ceremony. Switch to StoreProvider when needed. |
+
+Start with singleton fallback for app-wide stores. Use `StoreProvider` the moment you need multiple instances, server data, or nested stores.
+
+> [!TIP]
+> You can use both patterns in the same app. When `useStore(Def)` is called outside a `StoreProvider`, it reads from the singleton. Inside a `StoreProvider`, it reads from the scoped instance. The same component works in both contexts.
+
+## Next steps
+
+- [useStore](/react/use-store/) — Context-aware store access, the handle API, and when to use it
+- [Singleton Fallback](/react/static-api/) — How singleton access works and when to switch to Provider
+- [Provider & withProvider](/react/provider/) — Scoped instances, nested stores, and real use cases
+- [Scoped Instances](/react/scoped-instances/) — Store.create(), disposal, and SSR

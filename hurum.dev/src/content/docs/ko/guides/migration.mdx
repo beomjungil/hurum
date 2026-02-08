@@ -1,0 +1,261 @@
+---
+title: "마이그레이션 가이드"
+description: "Flux/Redux/Zustand 아키텍처에서 Hurum으로 마이그레이션해요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Redux, Zustand, MobX, 또는 커스텀 Flux 아키텍처에서 오셨다면, 이 가이드가 이미 알고 있는 개념을 Hurum의 대응 요소에 매핑하고 실용적인 마이그레이션 전략을 안내해요.
+
+## 개념 매핑
+
+| 기존 아키텍처 | Hurum 대응 요소 | 비고 |
+|---|---|---|
+| Action / ActionType | **Intent** | Intent는 *무엇이 일어나야 하는지*가 아니라 *사용자가 하고 싶은 것*을 선언해요. |
+| Action Creator | **Intent + Command** | `Intent(ValidateCommand, SaveCommand)`가 실행할 Command를 묶어요. |
+| Reducer | **Store.on** | Event 타입별로 키가 지정된 순수 상태 전환. |
+| Thunk / Saga / Epic | **CommandExecutor** | 모든 비동기 로직과 사이드 이펙트가 여기에 존재해요. |
+| Selector / 파생 상태 | **Computed** | `.computed({ key: (state) => value })`. 상태 변경 시 즉시 재계산돼요. |
+| Middleware | **Middleware** | `onEvent`, `onStateChange`, `onIntentStart`, `onIntentEnd`, `onError` 훅. |
+| Store (Redux) | **Store** | 상태, 리듀서, Computed, Intent, Executor, deps를 모두 포함해요. 하나의 정의에 모든 것이 담겨요. |
+| dispatch() | **store.send()** | `store.send.intentName(payload)` 또는 `store.send(PreparedIntent)`. |
+| useSelector() | **store.use.key()** | 필드별 훅. 해당 필드가 변경될 때만 리렌더링돼요. |
+| Provider (Redux) | **Store.Provider** | SSR과 스코프 인스턴스에 사용돼요. 전역 싱글턴에는 Provider가 필요 없어요. |
+
+## 핵심 차이점
+
+Redux 스타일 아키텍처에서는 하나의 액션이 리듀서, 미들웨어, 사가, 셀렉터를 동시에 트리거할 수 있어요. 사이드 이펙트는 thunk, middleware, saga 등 여러 경로에서 발생할 수 있어요.
+
+Hurum에서는 하나의 경로만 존재해요: **Intent -> Command -> Executor -> Event -> Store.on -> Computed**. 동기든 비동기든 모든 상태 변경이 정확히 이 파이프라인을 따라요.
+
+## 마이그레이션 전략
+
+한 번에 모두 다시 작성하지 마세요. 한 번에 하나의 도메인 프로세스씩 마이그레이션해요.
+
+### 1단계: 기존 로직을 Executor로 래핑
+
+기존 UseCase, 서비스, 또는 thunk 로직을 CommandExecutor 안에 래핑하는 것부터 시작해요. 이렇게 하면 비즈니스 로직을 다시 작성하지 않고도 Hurum의 아키텍처를 도입할 수 있어요.
+
+```ts
+import { CommandExecutor, Events, Event } from '@hurum/core'
+
+// Your existing UseCase class stays the same
+interface SavePurchaseUseCase {
+  execute(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+}
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+// Phase 1: Executor wraps the existing UseCase
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { saveUseCase: SavePurchaseUseCase }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.saveUseCase.execute(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+UseCase는 여전히 실제 작업을 수행해요. Executor는 이걸 Hurum의 Event 기반 흐름으로 연결하는 다리 역할만 해요.
+
+### 2단계: 직접 구현
+
+Store가 작동하고 테스트가 완료되면, UseCase 래퍼를 직접적인 의존성 호출로 교체해요:
+
+```ts
+// Phase 2: Executor calls the repository directly
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+Executor 함수의 형태는 동일해요. `deps`에 들어가는 것만 바뀌었을 뿐이에요. Store 정의, Intent, Event, React 컴포넌트는 그대로 유지돼요.
+
+## 단계별 진행: 하나의 프로세스 마이그레이션
+
+Redux 스타일 아키텍처에서 "구매 저장" 흐름을 마이그레이션하는 과정을 살펴볼게요.
+
+### 1단계: 도메인 프로세스 식별
+
+상태 변경과 사이드 이펙트를 트리거하는 하나의 사용자 액션을 선택해요. 예: "사용자가 구매 폼에서 저장을 클릭한다."
+
+기존 코드에서 이것은 다음을 포함할 수 있어요:
+- `SAVE_PURCHASE_REQUEST` 액션
+- API를 호출하는 thunk 또는 saga
+- `SAVE_PURCHASE_SUCCESS` / `SAVE_PURCHASE_FAILURE` 액션
+- 각 액션에 대한 리듀서 케이스
+- `isSaving`과 `saveError`를 위한 셀렉터
+
+### 2단계: Event 정의
+
+기존 액션을 Event로 매핑해요. Event는 과거 시제의 사실이에요:
+
+```ts
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),        // was SAVE_PURCHASE_REQUEST
+  saved: Event<{ purchase: Purchase }>(),         // was SAVE_PURCHASE_SUCCESS
+  saveFailed: Event<{ error: SaveError }>(),      // was SAVE_PURCHASE_FAILURE
+})
+```
+
+### 3단계: 기존 로직 래핑
+
+thunk/saga를 가져와 Executor 안에 넣어요. 동일한 의존성을 주입해요:
+
+```ts
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { saveUseCase: SavePurchaseUseCase }  // Same dependency as your thunk
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+  const result = await deps.saveUseCase.execute(command.purchase)
+  if (signal.aborted) return
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+### 4단계: Store 정의
+
+리듀서 케이스를 `on` 핸들러로 변환해요:
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor)
+  .deps<{ saveUseCase: SavePurchaseUseCase }>()
+```
+
+### 5단계: 컴포넌트 훅 교체
+
+`useSelector` / `useDispatch`를 Hurum의 훅으로 교체해요:
+
+```tsx
+// Before (Redux-style)
+function SaveButton() {
+  const dispatch = useDispatch()
+  const saving = useSelector(selectIsSaving)
+  const error = useSelector(selectSaveError)
+
+  return (
+    <button onClick={() => dispatch(savePurchase(purchase))} disabled={saving}>
+      Save
+    </button>
+  )
+}
+
+// After (Hurum)
+function SaveButton() {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+  const error = store.use.error()
+
+  return (
+    <button onClick={() => store.send.saveClicked({ purchase })} disabled={saving}>
+      Save
+    </button>
+  )
+}
+```
+
+<Aside type="tip">
+  마이그레이션 중에 기존 Redux 컴포넌트와 새 Hurum 컴포넌트를 나란히 실행할 수 있어요. 완전히 독립적이에요. 한 번에 한 페이지 또는 한 기능씩 마이그레이션하세요.
+</Aside>
+
+## 흔한 함정
+
+### 액션을 1:1로 Intent에 매핑하지 마세요
+
+Redux에서는 수십 개의 액션 타입이 있을 수 있어요. Hurum에서 Intent는 **사용자 액션**(사용자가 무엇을 클릭했는지, 어떤 페이지를 열었는지)을 나타내며, 내부 작업이 아니에요. 많은 Redux 액션은 Intent가 아닌 Event에 매핑돼요.
+
+```ts
+// Redux had separate actions for:
+// SAVE_PURCHASE_REQUEST, SAVE_PURCHASE_SUCCESS, SAVE_PURCHASE_FAILURE
+
+// Hurum has one intent (what the user did):
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+// And three events (what happened as a result):
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+### Event 레이어를 건너뛰지 마세요
+
+Executor에서 직접 `setState`를 호출하고 싶은 유혹이 있을 수 있어요. 참으세요. 간단한 작업이라도 항상 Event를 emit하세요. 이것이 Hurum Store를 예측 가능하고 테스트 가능하게 만드는 요소예요.
+
+### on 핸들러에 비즈니스 로직을 넣지 마세요
+
+`on` 핸들러는 순수 상태 전환이어야 해요. `on` 핸들러에서 API 호출이나 복잡한 파생 데이터 계산을 하고 있다면, 해당 로직을 Executor나 Computed 값으로 옮기세요.
+
+## 마이그레이션 체크리스트
+
+마이그레이션하는 각 도메인 프로세스에 대해:
+
+- [ ] 사용자 액션과 사이드 이펙트 식별
+- [ ] Event 정의 (과거 시제 사실: requested, succeeded, failed)
+- [ ] Executor 생성 (먼저 기존 로직 래핑, 나중에 리팩터링)
+- [ ] Intent 정의 (사용자 액션당 하나)
+- [ ] Store 구축 (state + on 핸들러 + Computed + Executor + deps)
+- [ ] TestStore로 테스트 작성
+- [ ] 컴포넌트 훅 교체 (useSelector -> store.use.key(), dispatch -> store.send)
+- [ ] 이 프로세스에 대한 기존 Redux/Flux 코드 제거

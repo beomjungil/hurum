@@ -1,0 +1,312 @@
+---
+title: Store
+description: "Store 빌더와 StoreInstance의 API 레퍼런스예요."
+---
+
+```ts
+import { Store } from '@hurum/core'
+```
+
+## `Store({ state })`
+
+초기 상태 객체로 Store 빌더를 생성해요. 체이닝 가능한 빌더를 반환하며, 동시에 `StoreDefinition`이기도 해요 -- 어느 시점에서든 `.create()`를 호출하거나 체이닝을 계속할 수 있어요.
+
+### 시그니처
+
+```ts
+function Store<TState extends Record<string, unknown>>(
+  config: { state: TState },
+): StoreBuilder<Record<string, never>, TState, Record<string, never>>
+```
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `config.state` | `Record<string, unknown>` | 초기 raw 상태. 각 키가 상태 필드가 돼요. |
+
+### 반환값
+
+체이닝 가능한 메서드를 가진 `StoreBuilder`.
+
+### 예제
+
+```ts
+const CounterStore = Store({ state: { count: 0, multiplier: 2 } })
+  .on(CounterEvent.incremented, (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }))
+  .computed({
+    doubled: (state) => state.count * 2,
+  })
+  .intents(CounterIntents)
+  .executors(IncrExec, DecrExec)
+
+const store = CounterStore.create()
+```
+
+---
+
+## 빌더 메서드
+
+### `.on(event, handler)` -- 개별 Event 핸들러
+
+단일 Event 타입에 대한 상태 리듀서를 등록해요.
+
+```ts
+.on(
+  event: EventCreator<TType, TPayload>,
+  handler: (state: State, payload: TPayload) => RawState,
+): StoreBuilder
+```
+
+`state` 매개변수에는 raw 상태, Computed 값, 그리고 해석된 Nested 상태가 포함돼요. 반환값은 raw 상태 형태만 포함해야 해요 (Computed 필드 제외).
+
+### `.on(namespace, handlers)` -- 네임스페이스 핸들러
+
+Event 네임스페이스에서 여러 핸들러를 한 번에 등록해요.
+
+```ts
+.on(
+  events: EventNamespace,
+  handlers: { [K in keyof EventNamespace]?: (state: State, payload: Payload) => RawState },
+): StoreBuilder
+```
+
+### 예제
+
+```ts
+// Per-event
+.on(CartEvent.itemAdded, (state, { item }) => ({
+  ...state,
+  items: [...state.items, item],
+}))
+
+// Namespace
+.on(CartEvent, {
+  itemAdded: (state, { item }) => ({ ...state, items: [...state.items, item] }),
+  cleared: () => ({ items: [] }),
+})
+```
+
+---
+
+### `.computed(definitions)`
+
+의존성이 변경될 때 자동으로 재계산되는 파생 상태 필드를 정의해요.
+
+```ts
+.computed<C extends Record<string, (state: ResolvedState) => unknown>>(
+  def: C,
+): StoreBuilder
+```
+
+의존성 추적과 동작에 대한 자세한 내용은 [Computed API 레퍼런스](/ko/api/core/computed/)를 참조하세요.
+
+### 예제
+
+```ts
+.computed({
+  total: (state) => state.items.reduce((sum, item) => sum + item.price, 0),
+  isEmpty: (state) => state.items.length === 0,
+})
+```
+
+---
+
+### `.intents(container)`
+
+Intent 컨테이너를 등록해요. `store.send.intentName()` 단축키를 사용할 수 있게 돼요.
+
+```ts
+.intents(container: IntentsContainer): StoreBuilder
+```
+
+---
+
+### `.executors(...executors)`
+
+하나 이상의 Executor를 등록해요. 각 Executor의 Command는 디스패치 시점에 매칭돼요.
+
+```ts
+.executors(...execs: Executor[]): StoreBuilder
+```
+
+### 예제
+
+```ts
+.intents(CartIntents)
+.executors(AddItemExec, RemoveItemExec, CheckoutExec)
+```
+
+---
+
+### `.deps<T>()`
+
+이 Store의 의존성 타입을 선언해요. 의존성은 `Store.create({ deps })`에서 주입돼요.
+
+```ts
+.deps<D extends Record<string, unknown>>(): StoreBuilder
+```
+
+### 예제
+
+```ts
+.deps<{ repo: CartRepo; analytics: Analytics }>()
+```
+
+---
+
+### `.childDeps(key, mapper)`
+
+부모 의존성을 Nested 자식 Store의 의존성으로 매핑해요.
+
+```ts
+.childDeps<K extends keyof State & string>(
+  key: K,
+  mapper: (deps: TDeps) => ChildDeps,
+): StoreBuilder
+```
+
+### 예제
+
+```ts
+.childDeps('transaction', (deps) => ({
+  transactionRepo: deps.repo.transactions,
+}))
+```
+
+---
+
+### `.relay(event, handler)`
+
+하나의 Event를 0개 이상의 다른 Event로 변환하는 relay 핸들러를 등록해요. 크로스 Store Event 조율에 사용돼요.
+
+```ts
+.relay(
+  event: EventCreator<TType, TPayload>,
+  handler: (event: EventInstance, state: State) => EventInstance[],
+): StoreBuilder
+```
+
+### 예제
+
+```ts
+.relay(ChildEvent.completed, (event, state) => {
+  if (state.items.length === 0) {
+    return [ParentEvent.allCompleted()]
+  }
+  return []
+})
+```
+
+---
+
+### `.middleware(...middlewares)`
+
+하나 이상의 middleware 인스턴스 또는 팩토리를 등록해요.
+
+```ts
+.middleware(...mws: (Middleware | MiddlewareFactory)[]): StoreBuilder
+```
+
+---
+
+### `.create(options?)`
+
+Store를 인스턴스화해요. 활성 `StoreInstance`를 반환해요.
+
+```ts
+.create(options?: StoreCreateOptions): StoreInstance
+```
+
+---
+
+## `StoreCreateOptions`
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `initialState` | `Partial<ResolvedState>` | 초기 상태 값 오버라이드. 기본 상태와 딥 머지돼요. |
+| `deps` | `Partial<TDeps>` | 의존성 주입. 얕은 머지돼요. |
+
+### 예제
+
+```ts
+const store = MyStore.create({
+  initialState: { count: 10 },
+  deps: { repo: new CartRepo(apiClient) },
+})
+```
+
+---
+
+## `StoreInstance`
+
+`.create()`가 반환하는 활성 Store 인스턴스예요. 주요 런타임 API예요.
+
+### 메서드
+
+| 메서드 | 시그니처 | 설명 |
+|--------|-----------|-------------|
+| `send` | `(prepared: PreparedIntent) => IntentRef` | PreparedIntent를 디스패치해요. 취소용 `IntentRef`를 반환해요. |
+| `send` | `(intent: IntentDescriptor, payload) => IntentRef` | 명시적 Intent 디스크립터와 페이로드로 디스패치해요. |
+| `send.intentName` | `(payload) => IntentRef` | 이름 기반 단축키. `.intents()`로 Intent가 등록된 경우 사용할 수 있어요. |
+| `cancel` | `(ref: IntentRef) => void` | ref로 특정 실행 중인 Intent를 취소해요. |
+| `cancelAll` | `() => void` | 모든 실행 중인 Intent를 취소해요. |
+| `getState` | `() => State` | 현재 결합된 상태 (raw + Computed + Nested)를 가져와요. |
+| `subscribe` | `(cb: (state) => void) => () => void` | 상태 변경을 구독해요. 구독 해제 함수를 반환해요. |
+| `subscribe` | `('events', cb: (event) => void) => () => void` | raw Event 발행을 구독해요. |
+| `selector` | `(fn: (state) => T) => Selector<T>` | 메모이제이션된 파생 상태 Selector를 생성해요. |
+| `dispose` | `() => void` | 정리: 모든 Intent를 취소하고, Nested 자식을 해제하며, 리스너를 제거해요. |
+
+### 속성
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `scope` | `ScopeOf<TRawState>` | Nested 자식 Store 인스턴스에 접근해요. 키는 Nested 필드 이름과 일치해요. |
+
+### Send API
+
+Intent를 디스패치하는 세 가지 방법이 있어요:
+
+```ts
+// 1. PreparedIntent (recommended)
+store.send(CartIntents.addItem({ item }))
+
+// 2. Named shorthand
+store.send.addItem({ item })
+
+// 3. Descriptor + payload (legacy)
+store.send(CartIntents.addItem, { item })
+```
+
+세 가지 모두 `IntentRef`를 반환해요.
+
+---
+
+## 생명주기
+
+### 해제 (Disposal)
+
+`store.dispose()` 이후:
+- 모든 실행 중인 Intent가 취소돼요.
+- 모든 Nested 자식 Store가 해제돼요.
+- 모든 리스너가 제거돼요.
+- `store.send()` 호출 시 오류가 발생해요.
+- 이미 실행 중인 Executor에서의 `emit()` 호출은 조용히 무시돼요.
+
+### 상태 구독
+
+`subscribe(cb)`는 상태가 변경될 때마다 동기적으로 호출돼요. 콜백은 전체 결합된 상태 (raw + Computed + Nested)를 받아요. 구독 해제 함수를 반환해요.
+
+`subscribe('events', cb)`는 Store에 적용된 모든 Event에 대해 호출돼요. Nested 자식에서 버블링된 Event도 포함돼요.
+
+---
+
+## 참고사항
+
+- Store 빌더는 불변이에요. 각 메서드는 새 빌더 인스턴스를 반환해요.
+- 빌더 자체가 `StoreDefinition`이에요 -- `TestStore()`와 같은 테스팅 API에 직접 전달할 수 있어요.
+- `initialState`는 딥 머지를 사용해요. 중첩된 객체는 재귀적으로 머지돼요. `deps`는 얕은 머지를 사용해요.
+- 해제 후 Intent 전송은 예외를 던져요. 이는 의도적이에요 -- 생명주기 버그를 조기에 발견할 수 있게 해줘요.

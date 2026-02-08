@@ -1,0 +1,250 @@
+---
+title: Store
+description: Store는 하나의 프로세스에 대한 상태, 전환, Computed 값, 의존성, Executor를 소유해요.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 페이지는 [Event](/ko/concepts/event/), [CommandExecutor](/ko/concepts/command-executor/), [Intent](/ko/concepts/intent/)에 대한 이해를 전제로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Store는 Hurum의 중심 단위예요. 하나의 프로세스에 필요한 모든 것을 담고 있어요: 상태, Event 핸들러, Computed 값, Executor, 의존성, relay 규칙, 그리고 middleware.
+
+```ts
+import { Store } from '@hurum/core'
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .computed({
+    canSubmit: (state) => state.purchase !== null && !state.saving,
+    totalAmount: (state) =>
+      state.purchase?.items.reduce((sum, item) => sum + item.amount, 0) ?? 0,
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor, LoadExecutor)
+  .deps({ repository: new PurchaseRepository() })
+  .middleware(logger())
+```
+
+## 동작 방식
+
+Store는 플루언트 빌더 체인을 써서 구축해요. 각 메서드는 동작 레이어를 추가하고 새로운 Store 정의를 반환해요:
+
+| 메서드 | 목적 |
+|--------|---------|
+| `Store({ state })` | 초기 상태 정의 |
+| `.on(Events, { ... })` | Event 핸들러 등록 (순수한 상태 전환) |
+| `.computed({ ... })` | 파생 상태 정의 |
+| `.relay(Event, fn)` | 부모와 Nested 자식 Store 간 Event 전달 |
+| `.intents(...)` | Intent 네임스페이스 등록 |
+| `.executors(...)` | CommandExecutor 등록 |
+| `.deps({ ... })` | Executor에 의존성 제공 |
+| `.middleware(...)` | 읽기 전용 옵저버 연결 |
+
+### `.on`을 사용한 Event 핸들러
+
+`.on` 메서드는 Event에 대한 응답으로 상태를 전환하는 순수 함수를 등록해요:
+
+```ts
+.on(CounterEvent, {
+  incremented: (state, { amount }) => ({
+    ...state,
+    count: state.count + amount,
+  }),
+  reset: () => ({
+    count: 0,
+  }),
+})
+```
+
+각 핸들러는 현재 상태와 Event 페이로드를 받고, 다음 상태를 반환해요. 핸들러는 반드시 순수해야 해요 -- 사이드 이펙트 없음, 비동기 없음, 뮤테이션 없음.
+
+### Intent 보내기
+
+Store가 정의되면, Intent를 보내서 상호작용해요:
+
+```ts
+// v2 Send API -- shorthand
+PurchaseStore.send.submitButtonClicked({ id: '123' })
+
+// v2 Send API -- PreparedIntent form
+PurchaseStore.send(PurchaseIntents.submitButtonClicked({ id: '123' }))
+```
+
+두 형태는 동일해요. 축약형은 일반적인 사용에 더 간결하고, PreparedIntent 형태는 Intent를 값으로 전달해야 할 때 유용해요.
+
+### 상태 읽기
+
+```ts
+// Get the full state (raw + computed)
+const state = PurchaseStore.getState()
+console.log(state.purchase)    // raw state
+console.log(state.canSubmit)   // computed value
+```
+
+### 변경 구독
+
+```ts
+// Subscribe to state changes
+const unsubscribe = PurchaseStore.subscribe((state) => {
+  console.log('State changed:', state)
+})
+
+// Subscribe to raw events
+const unsubEvents = PurchaseStore.subscribe('events', (event) => {
+  console.log('Event emitted:', event.type)
+})
+```
+
+## 싱글턴 vs. 스코프 인스턴스
+
+기본적으로 Store 정의는 **전역 싱글턴**으로 동작해요. 클라이언트 사이드 앱에서 Store당 하나의 인스턴스가 일반적이므로 편리해요:
+
+```ts
+// Singleton -- same instance everywhere
+const CounterStore = Store({ state: { count: 0 } })
+  .on({ /* ... */ })
+  .intents(CounterIntents)
+  .executors(IncrementExecutor)
+
+// Use directly
+CounterStore.send.plusClicked({ amount: 1 })
+CounterStore.getState().count
+```
+
+SSR이나 격리된 인스턴스가 필요한 경우에는 `Store.create()`를 사용하세요:
+
+```ts
+// Scoped instance -- independent state
+const store = PurchaseStore.create({
+  initialState: { purchase: existingPurchase },
+  deps: { repository: mockRepository },
+})
+
+store.send.submitButtonClicked({ id: '123' })
+store.getState()
+```
+
+`Store.create` 옵션:
+
+| 옵션 | 동작 |
+|--------|----------|
+| `initialState` | Store의 기본 상태와 딥 머지 |
+| `deps` | Store의 기본 deps와 얕은 머지 |
+
+:::caution[SSR에서는 스코프 인스턴스가 필요해요]
+싱글턴은 클라이언트 전용이에요. 서버 사이드 렌더링에서는 요청 간 상태 누수를 방지하기 위해 Provider 안에서 항상 `Store.create()`를 사용하세요.
+:::
+
+## 정리 (Disposal)
+
+Store 인스턴스를 정리하려면 `store.dispose()`를 호출하세요:
+
+```ts
+const store = PurchaseStore.create()
+
+// ... use the store ...
+
+store.dispose()
+```
+
+Disposal은 다음을 해요:
+- 실행 중인 모든 Executor 중단
+- 모든 리스너 구독 해제
+- 모든 Nested 자식 Store 정리
+- Store를 disposed 상태로 표시
+
+Disposal 이후:
+- `store.send(...)`는 에러를 throw해요
+- 아직 실행 중인 Executor 안의 `emit()`은 조용히 무시돼요
+
+:::note
+Provider는 Store를 자동으로 dispose **하지 않아요**. React Strict Mode에서 개발 중에 컴포넌트를 마운트/언마운트하는 것과의 호환성을 위해 의도된 동작이에요.
+:::
+
+## Nested Store 접근
+
+Store에 [Nested Store](/ko/concepts/nested-store/)가 있다면, `scope`로 인스턴스에 접근해요:
+
+```ts
+const PurchaseStore = Store({
+  state: {
+    transaction: Nested(TransactionStore),
+    items: Nested.array(ItemStore),
+  },
+})
+
+// Access child store instances
+PurchaseStore.scope.transaction  // TransactionStore instance
+PurchaseStore.scope.items        // ItemStore[] instances
+```
+
+## 자주 사용되는 패턴
+
+### 최소한의 Store
+
+가능한 가장 간단한 Store:
+
+```ts
+const ToggleStore = Store({ state: { on: false } })
+  .on(ToggleEvent, {
+    toggled: (state) => ({ on: !state.on }),
+  })
+  .intents(ToggleIntents)
+  .executors(ToggleExecutor)
+```
+
+### 의존성이 있는 Store
+
+```ts
+const UserStore = Store({
+  state: { user: null as User | null, loading: false },
+})
+  .on({ /* ... */ })
+  .intents(UserIntents)
+  .executors(LoadUserExecutor, UpdateUserExecutor)
+  .deps({
+    api: new UserApi(),
+    analytics: new AnalyticsService(),
+  })
+```
+
+### 여러 `.on` 호출
+
+`.on`을 여러 번 체이닝할 수 있어요. 핸들러가 병합돼요:
+
+```ts
+const MyStore = Store({ state: { /* ... */ } })
+  .on(EventA, (state, payload) => ({ /* ... */ }))
+  .on(EventB, (state, payload) => ({ /* ... */ }))
+```
+
+## 팁
+
+- **프로세스당 하나의 Store.** "구매 편집기", "사용자 프로필", "검색 패널" -- 각각 자체 Store를 가져요. 관련 없는 상태를 같은 Store에 넣지 마세요.
+- **`.on` 핸들러는 간단하게 유지하세요.** 한 줄이거나 거의 한 줄이어야 해요. 복잡한 로직은 Executor(emit 전)나 Computed 값(상태 변경 후)에 넣으세요.
+- **테스트에는 `Store.create()`를 사용하세요.** 프로덕션 코드가 싱글턴을 사용하더라도, 테스트는 테스트 케이스 간 상태 누수를 방지하기 위해 스코프 인스턴스를 사용해야 해요.
+- **테스트에서 항상 `dispose()`를 호출하세요.** 각 테스트 후에 Store를 dispose해서 실행 중인 Executor를 취소하고 메모리 누수를 방지하세요.

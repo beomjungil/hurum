@@ -1,0 +1,139 @@
+---
+title: Computed
+description: "Computed 상태 정의의 API 레퍼런스예요."
+---
+
+Computed 필드는 의존성이 변경될 때 자동으로 재계산되는 파생 상태예요. Store 빌더의 `.computed()`로 정의해요.
+
+```ts
+import { Store } from '@hurum/core'
+```
+
+## 정의
+
+```ts
+.computed({
+  key: (state) => derivedValue,
+})
+```
+
+### 시그니처
+
+```ts
+.computed<C extends Record<string, (state: ResolvedState) => unknown>>(
+  def: C,
+): StoreBuilder
+```
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `def` | `Record<string, (state) => T>` | 필드 이름에서 파생 함수로의 맵. 각 함수는 전체 해석된 상태 (raw + 다른 Computed + Nested)를 받아요. |
+
+### 예제
+
+```ts
+const CartStore = Store({
+  state: {
+    items: [] as CartItem[],
+    taxRate: 0.1,
+  },
+})
+.computed({
+  subtotal: (state) => state.items.reduce((sum, i) => sum + i.price * i.qty, 0),
+  tax: (state) => state.subtotal * state.taxRate,
+  total: (state) => state.subtotal + state.tax,
+})
+```
+
+이 예제에서 `tax`는 `subtotal`에 의존하고, `total`은 두 값 모두에 의존해요. Hurum은 위상 정렬로 평가 순서를 자동으로 결정해요.
+
+---
+
+## 동작
+
+### 프록시 기반 의존성 추적
+
+Computed 함수가 처음 실행될 때 Hurum은 상태를 추적 프록시로 감싸요. 모든 속성 접근이 의존성으로 기록돼요. 이후 평가에서는 의존성이 변경된 Computed 필드만 재계산돼요.
+
+```ts
+// This computed only re-evaluates when `items` changes
+.computed({
+  itemCount: (state) => state.items.length,
+})
+```
+
+Computed 함수가 조건부로 다른 필드에 접근하는 경우, 의존성 세트는 각 평가마다 업데이트돼요.
+
+### 즉시 재계산
+
+Computed 값은 Event가 의존성을 변경할 때 즉시 재계산돼요. `store.getState()`로 읽을 때 항상 최신 상태예요.
+
+### 구조적 동등성
+
+재계산 결과가 이전 값과 구조적으로 동일하면 이전 참조가 유지돼요. 이는 Computed 값이 객체나 배열일 때 React에서 불필요한 리렌더링을 방지해요.
+
+```ts
+// If items hasn't changed, the same array reference is returned
+.computed({
+  sortedItems: (state) => [...state.items].sort((a, b) => a.name.localeCompare(b.name)),
+})
+```
+
+구조적 동등성은 원시 값, 일반 객체, 배열에 대해 작동해요 (재귀적으로 비교).
+
+### 순환 의존성 감지
+
+Computed 필드 간 순환 의존성은 Store 생성 시 감지되어 오류를 던져요.
+
+```ts
+// This throws: "Circular dependency detected in computed fields: a"
+.computed({
+  a: (state) => state.b + 1,
+  b: (state) => state.a + 1,
+})
+```
+
+---
+
+## Computed와 Nested 상태
+
+Computed 함수는 Nested 자식 Store 상태를 읽을 수 있어요. 자식 Store의 상태가 변경되면, Nested 키에 의존하는 부모 Computed 필드가 재계산돼요.
+
+```ts
+const ParentStore = Store({
+  state: {
+    transaction: Nested(TransactionStore),
+  },
+})
+.computed({
+  isComplete: (state) => state.transaction.status === 'complete',
+})
+```
+
+---
+
+## `on` 핸들러에서의 Computed
+
+`on` 핸들러에 전달되는 상태에는 Computed 값이 포함돼요. 핸들러가 상태 전환을 결정할 때 파생 상태를 읽을 수 있어요.
+
+```ts
+.on(CartEvent.itemAdded, (state, { item }) => ({
+  ...state,
+  items: [...state.items, item],
+  // state.total is available here (from computed)
+  lastTotal: state.total,
+}))
+```
+
+`on` 핸들러의 반환값은 raw 상태 필드만 포함해야 해요. Computed 필드는 자동으로 제거돼요.
+
+---
+
+## 참고사항
+
+- Computed 필드는 `store.getState()`에서 raw 필드와 함께 나타나요. 별도의 접근자는 없어요.
+- Computed 함수는 순수해야 해요. 사이드 이펙트가 없어야 해요.
+- 의존성 추적은 상태 객체의 최상위 속성 접근만 캡처해요. `state.items[0].price`에 접근하면 개별 배열 요소가 아닌 `items`를 추적해요.
+- Computed 정의는 누적돼요. `.computed()`를 여러 번 호출하면 정의가 머지돼요 (이후 호출이 중복 키를 오버라이드).

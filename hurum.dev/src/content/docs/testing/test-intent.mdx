@@ -1,0 +1,123 @@
+---
+title: "TestIntent"
+description: "Verify intent command composition and execution mode."
+---
+
+`TestIntent` inspects an intent descriptor's configuration: which steps (commands or event creators) it references and what execution mode it uses. It answers the question "when this intent is dispatched, what will the store execute?"
+
+## Setup
+
+```ts
+import { TestIntent } from '@hurum/core/testing'
+import { PurchaseIntents } from './intents'
+
+const intent = TestIntent(PurchaseIntents.submitClicked)
+```
+
+`TestIntent` takes an intent descriptor (from your `Intents()` definition) and returns a read-only object with `steps` and `mode`.
+
+## steps
+
+The list of steps (commands or event creators) the intent will execute:
+
+```ts
+const intent = TestIntent(PurchaseIntents.submitClicked)
+
+expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+```
+
+This verifies that the intent is wired to the correct steps. If you refactor an intent to add or remove a step, this test catches the change.
+
+An intent step can be either a `Command` or an `EventCreator`:
+
+```ts
+// Command steps
+expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+
+// EventCreator steps (direct event emit, no executor needed)
+const toggleIntent = TestIntent(CounterIntents.toggle)
+expect(toggleIntent.steps).toEqual([CounterEvent.toggled])
+```
+
+## mode
+
+The execution mode -- how the steps are run:
+
+```ts
+// Sequential (default): steps run one after another
+const sequential = TestIntent(PurchaseIntents.submitClicked)
+expect(sequential.mode).toBe('sequential')
+
+// All (fail-fast parallel): steps run concurrently, abort all on first failure
+const failFast = TestIntent(PurchaseIntents.loadAll)
+expect(failFast.mode).toBe('all')
+
+// AllSettled (independent parallel): steps run concurrently, all complete independently
+const independent = TestIntent(PurchaseIntents.initialize)
+expect(independent.mode).toBe('allSettled')
+```
+
+| Mode | Created with | Behavior |
+|------|-------------|----------|
+| `sequential` | `Intent(step1, step2)` | Run steps one after another |
+| `all` | `Intent.all(step1, step2)` | Run concurrently, fail-fast on error |
+| `allSettled` | `Intent.allSettled(step1, step2)` | Run concurrently, all complete independently |
+
+## Full example
+
+```ts title="intents.test.ts"
+import { describe, it, expect } from 'vitest'
+import { TestIntent } from '@hurum/core/testing'
+import { PurchaseIntents } from './intents'
+import {
+  ValidateCommand,
+  SavePurchaseCommand,
+  LoadPricesCommand,
+  LoadInventoryCommand,
+} from './executors'
+
+describe('PurchaseIntents', () => {
+  it('submitClicked runs validation then save', () => {
+    const intent = TestIntent(PurchaseIntents.submitClicked)
+
+    expect(intent.steps).toEqual([ValidateCommand, SavePurchaseCommand])
+    expect(intent.mode).toBe('sequential')
+  })
+
+  it('initialize loads prices and inventory concurrently', () => {
+    const intent = TestIntent(PurchaseIntents.initialize)
+
+    expect(intent.steps).toEqual([LoadPricesCommand, LoadInventoryCommand])
+    expect(intent.mode).toBe('allSettled')
+  })
+
+  it('plusClicked runs a single command', () => {
+    const intent = TestIntent(CounterIntents.plusClicked)
+
+    expect(intent.steps).toHaveLength(1)
+    expect(intent.steps).toEqual([IncrementCommand])
+    expect(intent.mode).toBe('sequential')
+  })
+})
+```
+
+## When to use TestIntent
+
+TestIntent is a lightweight sanity check. Use it when:
+
+- **An intent wires multiple steps.** Verify the steps are correct and in the right order.
+- **An intent uses parallel execution.** Confirm the mode is `all` or `allSettled`, not accidentally `sequential`.
+- **You refactor intent structure.** A TestIntent test breaks immediately if a step is added, removed, or reordered.
+
+For single-step intents with `sequential` mode, the test is simple but still valuable as documentation of intent:
+
+```ts
+expect(intent.steps).toEqual([IncrementCommand])
+expect(intent.mode).toBe('sequential')
+```
+
+## Next steps
+
+- [TestExecutor](/testing/test-executor/) -- Test the executors that commands reference
+- [TestStore](/testing/test-store/) -- Integration test the full flow
+- [Testing Overview](/testing/overview/) -- All five utilities at a glance

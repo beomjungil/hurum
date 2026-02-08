@@ -1,0 +1,211 @@
+---
+title: Intent
+description: "API reference for Intent, Intents, and execution modes."
+---
+
+```ts
+import { Intent, Intents } from '@hurum/core'
+```
+
+## `Intent(...steps)`
+
+Creates a sequential intent. Steps execute one after another. If any step throws, subsequent steps are skipped.
+
+Each step can be a `Command` or an `EventCreator`. Command steps are dispatched to their registered executor. EventCreator steps emit the event directly — no executor registration is needed.
+
+### Signature
+
+```ts
+function Intent<TInput>(...steps: IntentStep<TInput>[]): IntentAction<TInput>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `...steps` | `IntentStep<TInput>[]` | One or more steps (commands or event creators) to execute in order. |
+
+### Returns
+
+An `IntentAction<TInput>` -- both an intent descriptor and a callable function.
+
+### Example
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  // Command steps — run executors
+  submitClicked: Intent(ValidateCmd, SaveCmd),
+  pageOpened: Intent(LoadCmd),
+
+  // EventCreator step — emit directly, no executor needed
+  cancelled: Intent(PurchaseEvent.cancelled),
+})
+```
+
+---
+
+## `Intent.all(...steps)`
+
+Creates a parallel, fail-fast intent. All steps start simultaneously. If one fails, the others are aborted via their `AbortSignal`.
+
+### Signature
+
+```ts
+Intent.all<TInput>(...steps: IntentStep<TInput>[]): IntentAction<TInput>
+```
+
+### Example
+
+```ts
+const DashboardIntents = Intents('Dashboard', {
+  pageOpened: Intent.all(LoadUserCmd, LoadStatsCmd, LoadNotificationsCmd),
+})
+```
+
+---
+
+## `Intent.allSettled(...steps)`
+
+Creates a parallel, independent intent. All steps start simultaneously. Each runs to completion independently -- a failure in one does not affect the others.
+
+### Signature
+
+```ts
+Intent.allSettled<TInput>(...steps: IntentStep<TInput>[]): IntentAction<TInput>
+```
+
+### Example
+
+```ts
+const SyncIntents = Intents('Sync', {
+  syncAll: Intent.allSettled(SyncContactsCmd, SyncCalendarCmd, SyncFilesCmd),
+})
+```
+
+---
+
+## `Intents(prefix, definitions)`
+
+Creates a namespaced container of intents. The container is passed to `Store.intents()` to register intent actions on the store.
+
+### Signature
+
+```ts
+function Intents<TPrefix extends string, TDefs extends Record<string, IntentDescriptor>>(
+  prefix: TPrefix,
+  intents: TDefs,
+): TDefs & IntentsContainer
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `prefix` | `string` | Namespace prefix for identification. |
+| `intents` | `Record<string, IntentDescriptor>` | A map of intent names to `Intent(...)` definitions. |
+
+### Returns
+
+An `IntentsContainer` with the same keys as `intents`. Each value is an `IntentAction`.
+
+### Example
+
+```ts
+const CartIntents = Intents('Cart', {
+  addItem: Intent(AddItemCmd),
+  checkout: Intent(ValidateCartCmd, ProcessPaymentCmd, ConfirmOrderCmd),
+  refreshPrices: Intent.all(FetchPriceCmd, FetchTaxCmd),
+})
+```
+
+---
+
+## `IntentStep<TInput>`
+
+The union type for steps that an intent can execute:
+
+```ts
+type IntentStep<TInput> = Command<TInput> | EventCreator<string, TInput>
+```
+
+- **`Command<TInput>`** — Dispatched to a registered executor. The executor runs async logic, accesses deps, and emits events.
+- **`EventCreator<string, TInput>`** — Emitted directly as an event. No executor needed. Use this for simple state transitions that just map a payload to an event.
+
+---
+
+## `IntentAction<TInput>`
+
+The type of each intent produced by `Intent(...)`. It is both an `IntentDescriptor` and a callable function.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `steps` | `ReadonlyArray<IntentStep<TInput>>` | The steps (commands or event creators) this intent will execute. |
+| `mode` | `'sequential' \| 'all' \| 'allSettled'` | The execution strategy. |
+
+### Call Signature
+
+```ts
+(payload: TInput) => PreparedIntent<TInput>
+```
+
+Calling an `IntentAction` with a payload produces a `PreparedIntent` ready for `store.send()`.
+
+### Example
+
+```ts
+// Create a PreparedIntent
+const prepared = CartIntents.addItem({ item: newItem })
+
+// Send it
+store.send(prepared)
+
+// Or use the shorthand (equivalent)
+store.send.addItem({ item: newItem })
+```
+
+---
+
+## `PreparedIntent<TInput>`
+
+An intent paired with its payload, ready to be dispatched. Created by calling an `IntentAction` with a payload.
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `intent` | `IntentDescriptor<TInput>` | The original intent descriptor. |
+| `payload` | `TInput` | The payload to pass to each step. |
+
+---
+
+## `IntentRef`
+
+An opaque reference returned by `store.send()`. Used for cancellation.
+
+```ts
+const ref = store.send.submitClicked({ formData })
+
+// Cancel this specific intent
+store.cancel(ref)
+```
+
+---
+
+## Execution Modes Summary
+
+| Mode | Function | Behavior on Failure |
+|------|----------|---------------------|
+| Sequential | `Intent(A, B, C)` | Stops at the failing step. B and C are skipped. |
+| Parallel fail-fast | `Intent.all(A, B, C)` | Aborts all others via `AbortSignal`. |
+| Parallel independent | `Intent.allSettled(A, B, C)` | Other steps continue. Error is reported via middleware. |
+
+---
+
+## Notes
+
+- Intents represent user actions or system triggers ("submit clicked", "page opened"). Name them from the user's perspective.
+- The payload type `TInput` is shared across all steps in an intent. Every executor or event creator in the chain receives the same payload.
+- Use `Intent()` (sequential) as the default. Switch to `Intent.all()` or `Intent.allSettled()` only when parallel execution is needed.
+- For simple state transitions that just emit an event, pass the `EventCreator` directly to `Intent()` -- no `CommandExecutor` needed.

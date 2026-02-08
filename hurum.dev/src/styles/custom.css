@@ -1,0 +1,326 @@
+@import '@fontsource-variable/mona-sans/wdth.css';
+@font-face {
+  font-family: 'Pretendard Heading';
+  src: url('https://cdn.jsdelivr.net/npm/pretendard@latest/dist/web/static/woff2/Pretendard-ExtraBold.woff2') format('woff2');
+  font-weight: 700;
+  font-display: swap;
+}
+
+/* ═══════════════════════════════════════
+   Hurum Brand Theme
+   Light: #0084FF  Dark: #2B98FF
+   ═══════════════════════════════════════ */
+
+/* ── Dark mode palette ────────────── */
+
+:root {
+  /* Accent */
+  --sl-color-accent-low: #0d1d30;
+  --sl-color-accent: #2B98FF;
+  --sl-color-accent-high: #dceeff;
+
+  /* Gray scale — desaturated blue, clean & minimal */
+  --sl-color-black: #09090f;
+  --sl-color-gray-1: hsl(220, 8%, 93%);
+  --sl-color-gray-2: hsl(220, 5%, 68%);
+  --sl-color-gray-3: hsl(220, 4%, 46%);
+  --sl-color-gray-4: hsl(220, 4%, 30%);
+  --sl-color-gray-5: hsl(220, 5%, 18%);
+  --sl-color-gray-6: hsl(220, 6%, 13%);
+  --sl-color-white: hsl(0, 0%, 100%);
+
+  /* Surface — unified dark background */
+  --sl-color-bg: #0c0d14;
+  --sl-color-bg-nav: #0c0d14;
+  --sl-color-bg-sidebar: #0c0d14;
+
+  --sl-color-hairline: hsl(220, 6%, 16%);
+  --sl-color-hairline-light: hsl(220, 5%, 20%);
+
+  --sl-color-bg-inline-code: rgba(43, 152, 255, 0.07);
+}
+
+/* ── Light mode palette ───────────── */
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e2f0ff;
+  --sl-color-accent: #0070d6;
+  --sl-color-accent-high: #0a2240;
+
+  /* Starlight semantics: "white" = foreground/text, "black" = surface/bg */
+  --sl-color-white: #111827;
+  --sl-color-black: hsl(220, 20%, 99%);
+  --sl-color-gray-1: hsl(220, 8%, 20%);
+  --sl-color-gray-2: hsl(220, 5%, 40%);
+  --sl-color-gray-3: hsl(220, 4%, 54%);
+  --sl-color-gray-4: hsl(220, 4%, 72%);
+  --sl-color-gray-5: hsl(220, 6%, 88%);
+  --sl-color-gray-6: hsl(220, 8%, 94%);
+
+  --sl-color-bg: hsl(220, 20%, 99%);
+  --sl-color-bg-nav: hsl(220, 20%, 99%);
+  --sl-color-bg-sidebar: hsl(220, 20%, 99%);
+
+  --sl-color-hairline: hsl(220, 10%, 90%);
+  --sl-color-hairline-light: hsl(220, 8%, 86%);
+
+  --sl-color-bg-inline-code: rgba(0, 112, 214, 0.06);
+}
+
+/* ── Asides (Note / Tip / Caution) ── */
+
+:root {
+  --sl-hue-blue: 212;
+}
+
+.starlight-aside {
+  border: none;
+  border-radius: 0.75rem;
+}
+
+.starlight-aside--tip {
+  --sl-color-asides-text-accent: var(--sl-color-blue-high);
+  --sl-color-asides-border: var(--sl-color-blue);
+  background-color: var(--sl-color-blue-low);
+}
+
+/* ── Heading font ────────────────── */
+
+h1#_top,
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6),
+.hero h1 {
+  font-family: 'Mona Sans Variable', 'Mona Sans',system-ui, sans-serif;
+  font-weight: 700;
+  font-variation-settings: "wdth" 100;
+}
+
+[lang="ko"] h1#_top,
+[lang="ko"] .sl-markdown-content :is(h1, h2, h3, h4, h5, h6),
+[lang="ko"] .hero h1 {
+  font-family: 'Mona Sans Variable', 'Mona Sans','Pretendard Heading', system-ui, sans-serif;
+}
+
+/* ── Header / Nav ─────────────────── */
+
+header.header {
+  backdrop-filter: blur(12px) saturate(1.4);
+  -webkit-backdrop-filter: blur(12px) saturate(1.4);
+  background: color-mix(in srgb, var(--sl-color-bg) 82%, transparent) !important;
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+:root[data-theme='light'] header.header {
+  background: color-mix(in srgb, var(--sl-color-bg) 88%, transparent) !important;
+}
+
+/* Logo sizing */
+.site-title img {
+  height: 1.8rem;
+  width: auto;
+}
+
+/* Search bar */
+site-search button {
+  border-color: var(--sl-color-hairline) !important;
+}
+
+/* ── Sidebar ──────────────────────── */
+
+.sidebar-pane {
+  border-inline-end: 1px solid var(--sl-color-hairline);
+}
+
+/* Group labels */
+.sidebar-content .top-level > li > details > summary,
+.sidebar-content .top-level > li > details > summary span {
+  font-weight: 600;
+  font-size: var(--sl-text-sm);
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+/* Active item highlight */
+[aria-current="page"] {
+  background: var(--sl-color-accent-low) !important;
+  color: var(--sl-color-accent) !important;
+  border-radius: 0.375rem;
+  font-weight: 500;
+}
+
+/* Sidebar link hover */
+.sidebar-content a:not([aria-current="page"]):hover {
+  color: var(--sl-color-white);
+}
+
+/* ── Hero ─────────────────────────── */
+
+.hero {
+  padding-block: 4rem 2rem !important;
+  position: relative;
+  overflow: visible;
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 50% 50% at 68% 50%, rgba(43, 152, 255, 0.14) 0%, transparent 70%),
+    radial-gradient(ellipse 70% 60% at 50% 110%, rgba(43, 152, 255, 0.06) 0%, transparent 60%);
+  pointer-events: none;
+}
+
+:root[data-theme='light'] .hero::before {
+  background:
+    radial-gradient(ellipse 50% 50% at 68% 50%, rgba(0, 112, 214, 0.07) 0%, transparent 70%),
+    radial-gradient(ellipse 70% 60% at 50% 110%, rgba(0, 112, 214, 0.04) 0%, transparent 60%);
+}
+
+.hero img {
+  filter: drop-shadow(0 0 40px rgba(43, 152, 255, 0.35)) drop-shadow(0 0 12px rgba(43, 152, 255, 0.15));
+}
+
+:root[data-theme='light'] .hero img {
+  filter: drop-shadow(0 0 28px rgba(0, 112, 214, 0.12));
+}
+
+.hero h1 {
+  line-height: 1 !important;
+}
+
+.hero h1 img {
+  height: clamp(2.5rem, 5vw, 4rem);
+  width: auto;
+}
+
+.hero .tagline {
+  font-size: var(--sl-text-lg) !important;
+  max-width: 28ch;
+  line-height: 1.5;
+}
+
+.hero .sl-link-button.primary {
+  background: linear-gradient(135deg, #0084FF 0%, #2B98FF 100%);
+  border: none;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(0, 132, 255, 0.25), 0 0 0 1px rgba(43, 152, 255, 0.15);
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+
+.hero .sl-link-button.primary:hover {
+  box-shadow: 0 6px 24px rgba(0, 132, 255, 0.4), 0 0 0 1px rgba(43, 152, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+:root[data-theme='light'] .hero .sl-link-button.primary {
+  background: linear-gradient(135deg, #0070d6 0%, #0084FF 100%);
+  box-shadow: 0 4px 16px rgba(0, 112, 214, 0.18);
+  color: #fff;
+}
+
+:root[data-theme='light'] .hero .sl-link-button.primary:hover {
+  box-shadow: 0 6px 24px rgba(0, 112, 214, 0.3);
+}
+
+/* ── Cards ────────────────────────── */
+
+.card {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  border-color: color-mix(in srgb, var(--sl-color-accent) 50%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sl-color-accent) 20%, transparent);
+}
+
+/* ── Links ────────────────────────── */
+
+.sl-markdown-content a {
+  text-decoration-color: color-mix(in srgb, var(--sl-color-accent), transparent 60%);
+  text-underline-offset: 0.15em;
+}
+
+.sl-markdown-content a:hover {
+  text-decoration-color: var(--sl-color-accent);
+}
+
+/* ── TOC (right sidebar) ──────────── */
+
+starlight-toc a[aria-current="true"] {
+  color: var(--sl-color-accent) !important;
+  font-weight: 500;
+}
+
+/* ── Page Actions (LLM buttons) ──── */
+
+.action-button {
+  background-color: transparent !important;
+  border: 1px solid var(--sl-color-hairline) !important;
+  border-radius: 0.5rem !important;
+  color: var(--sl-color-gray-2) !important;
+  font-size: var(--sl-text-xs) !important;
+  padding: 0.375rem 0.625rem !important;
+  height: auto !important;
+  transition: color 0.2s, border-color 0.2s !important;
+}
+
+.action-button:hover {
+  color: var(--sl-color-white) !important;
+  border-color: var(--sl-color-hairline-light) !important;
+}
+
+.actions-container {
+  margin-top: 0.25rem;
+}
+
+#dropdown-menu {
+  background-color: var(--sl-color-bg) !important;
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border: 1px solid var(--sl-color-hairline) !important;
+  border-radius: 0.5rem !important;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.25),
+    0 0 0 1px var(--sl-color-hairline) !important;
+  padding: 0.375rem !important;
+
+  /* animate instead of display toggle */
+  display: block !important;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-6px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  pointer-events: none;
+}
+
+#dropdown-menu.show {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.dropdown-item {
+  border-radius: 0.375rem !important;
+  font-size: var(--sl-text-xs) !important;
+  color: var(--sl-color-gray-2) !important;
+}
+
+.dropdown-item:hover {
+  background-color: color-mix(in srgb, var(--sl-color-white) 6%, transparent) !important;
+  color: var(--sl-color-white) !important;
+}
+
+:root[data-theme='light'] #dropdown-menu {
+  background-color: color-mix(in srgb, var(--sl-color-bg) 90%, transparent) !important;
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.08),
+    0 0 0 1px var(--sl-color-hairline) !important;
+}
+
+:root[data-theme='light'] .dropdown-item:hover {
+  background-color: color-mix(in srgb, var(--sl-color-black) 4%, transparent) !important;
+}

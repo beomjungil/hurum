@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.turbo/
+*.tsbuildinfo
+.next/
+.env
+.env.*
+!.env.example
+coverage/
+.astro/
+
+# editor / tool configs
+.claude/
+.agents/
+.serena/
+.mcp.json
+.DS_Store
+
+# internal docs
+plans/
+DOCS_PROGRESS.md

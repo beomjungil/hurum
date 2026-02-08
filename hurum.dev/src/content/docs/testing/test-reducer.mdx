@@ -1,0 +1,114 @@
+---
+title: "TestReducer"
+description: "Test on() handlers as pure functions."
+---
+
+`TestReducer` extracts the `.on()` handlers from a store definition and lets you apply events to state directly. No executors, no intents, no side effects -- just pure `(state, event) => newState` testing.
+
+## Setup
+
+```ts
+import { TestReducer } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+import { PurchaseEvent } from './events'
+
+const reducer = TestReducer(PurchaseStore)
+```
+
+`TestReducer` takes a store definition and returns an object with a single method: `apply`.
+
+## apply
+
+Apply an event to a state and get the new state back:
+
+```ts
+const initial = { purchase: null, saving: false, error: null }
+
+const next = reducer.apply(initial, PurchaseEvent.saveRequested({ id: '123' }))
+
+expect(next).toEqual({
+  purchase: null,
+  saving: true,
+  error: null,
+})
+```
+
+The `apply` method:
+1. Looks up the `.on()` handler for the event's type
+2. Calls it with `(state, payload)` where payload is the event without the `type` field
+3. Returns the new state
+
+If no handler exists for the event type, the original state is returned unchanged (same reference).
+
+## Chaining events
+
+Since `apply` returns a new state, you can chain multiple events to test a sequence:
+
+```ts
+const reducer = TestReducer(CounterStore)
+
+let state = { count: 0, multiplier: 2 }
+state = reducer.apply(state, CounterEvent.incremented({ amount: 3 }))
+state = reducer.apply(state, CounterEvent.incremented({ amount: 7 }))
+state = reducer.apply(state, CounterEvent.decremented({ amount: 2 }))
+
+expect(state.count).toBe(8)
+```
+
+This is useful for testing that a series of events produces the expected accumulated state.
+
+## Testing individual handlers
+
+Test each event handler independently with controlled inputs:
+
+```ts
+describe('PurchaseStore reducers', () => {
+  const reducer = TestReducer(PurchaseStore)
+  const initial = { purchase: null, saving: false, error: null }
+
+  it('saveRequested sets saving to true', () => {
+    const next = reducer.apply(initial, PurchaseEvent.saveRequested({ id: '123' }))
+    expect(next.saving).toBe(true)
+    expect(next.error).toBeNull()
+  })
+
+  it('saved stores the purchase and clears saving', () => {
+    const saving = { ...initial, saving: true }
+    const purchase = { id: '123', name: 'Widget' }
+
+    const next = reducer.apply(saving, PurchaseEvent.saved({ purchase }))
+
+    expect(next.saving).toBe(false)
+    expect(next.purchase).toEqual(purchase)
+  })
+
+  it('saveFailed stores the error and clears saving', () => {
+    const saving = { ...initial, saving: true }
+
+    const next = reducer.apply(saving, PurchaseEvent.saveFailed({ error: 'Network error' }))
+
+    expect(next.saving).toBe(false)
+    expect(next.error).toBe('Network error')
+  })
+
+  it('returns same state for unknown events', () => {
+    const next = reducer.apply(initial, { type: 'Unknown/event' })
+    expect(next).toBe(initial)  // same reference
+  })
+})
+```
+
+## Why test reducers separately?
+
+Reducers are the simplest part of the pipeline -- pure functions with no dependencies. Testing them directly gives you:
+
+- **Fast feedback.** No async, no setup, no mocks. Each test runs in microseconds.
+- **Exhaustive coverage.** Easy to test every event handler with many input combinations.
+- **Regression safety.** If a reducer accidentally drops a field, the test catches it immediately.
+
+For testing the full flow (intent to final state), use [TestStore](/testing/test-store/).
+
+## Next steps
+
+- [TestComputed](/testing/test-computed/) -- Test computed values with specific state inputs
+- [TestExecutor](/testing/test-executor/) -- Test executors in isolation

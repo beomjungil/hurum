@@ -1,0 +1,124 @@
+---
+title: Design Decisions
+description: "Why Hurum is designed the way it is -- decisions and rejected alternatives."
+---
+
+Every API in Hurum exists for a reason. This page documents the seven key design decisions, what was chosen, why, and what was rejected.
+
+## 1. Why no Effect type?
+
+**Conclusion**: There is no separate Effect concept. The `CommandExecutor` _is_ the effect boundary.
+
+In some architectures (Elm, Redux-Saga), effects or side effects are modeled as their own type -- a declarative description of work to be done. Hurum skips this layer. A `CommandExecutor` receives a command and directly performs the side effect (API call, timer, etc.), emitting events as outcomes.
+
+This means side effects are co-located with the code that interprets them. There is no indirection layer between "what should happen" and "doing it." The executor function is both the description and the execution.
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Elm-style `Cmd` type (declarative effects) | Adds a layer of indirection without clear benefit for TypeScript apps. Testing executors directly is simpler than testing effect descriptions + interpreters. |
+| Redux-Saga generators | Generator-based control flow is hard to type, hard to debug, and unfamiliar to most TypeScript developers. |
+| Separate Effect type that executors return | Forces every executor to return data instead of calling `emit()` directly. Makes async flows awkward (multiple effects from one executor). |
+
+---
+
+## 2. Why are Events first-class?
+
+**Conclusion**: Events and Commands are fundamentally different concepts. Commands are imperative ("do this"). Events are declarative facts ("this happened"). Both are first-class.
+
+Many state management libraries conflate actions with events. In Redux, an "action" is both a command to do something and a record of what happened. Hurum separates them:
+
+- **Commands** flow from Intents to Executors. They represent user intention.
+- **Events** flow from Executors to the Store. They represent accomplished facts.
+
+This separation makes the data flow unidirectional and unambiguous. You always know where you are in the pipeline by looking at the type: if it is a Command, side effects have not happened yet. If it is an Event, they have.
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Single "action" type for both (Redux-style) | Ambiguous. Is the action a request or a fact? Leads to patterns like `REQUEST`/`SUCCESS`/`FAILURE` prefixes that paper over the missing distinction. |
+| Events only, no Commands | Executors need input to know what to do. Without Commands, the Intent would need to directly describe the side effect, which couples intent declaration to implementation. |
+
+---
+
+## 3. Why separate @hurum/core and @hurum/react?
+
+**Conclusion**: The store is framework-agnostic. React bindings are a thin layer in a separate package.
+
+`@hurum/core` has zero runtime dependencies. It works in Node.js, Deno, browser scripts, or any JavaScript runtime. `@hurum/react` adds React-specific bindings (`useStore`, `Provider`, `useSyncExternalStore`) as a peer dependency.
+
+This split ensures:
+- Core logic is testable without React.
+- Other framework bindings (Vue, Svelte, Solid) can be built without pulling in React.
+- Server-side code can use stores without bundling React.
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Single package with optional React | Tree-shaking is unreliable for this pattern. Optional peer deps cause confusing install warnings. |
+| React-first with framework adapter pattern | Bakes React assumptions into the core (e.g. immutability patterns, hook lifecycle). |
+
+---
+
+## 4. How do Nested Stores communicate?
+
+**Conclusion**: Parent-mediated relay. No global event bus, no direct child-to-child communication.
+
+When a child store emits an event, it bubbles to the parent. The parent can react via `.relay()` handlers, transforming child events into parent events or forwarding them to other children. Children never talk directly to siblings.
+
+This keeps the communication graph a tree, not a mesh. Every cross-store interaction is visible in the parent's relay configuration.
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Global event bus | Invisible coupling. Any store can listen to any event from any other store. Dependencies become implicit and impossible to trace. |
+| Direct child-to-child references | Breaks encapsulation. Children should not know about their siblings. |
+| Shared context/DI for communication | Overloads the dependency injection mechanism. Dependencies are for services, not for inter-store coordination. |
+
+---
+
+## 5. How are Intent execution modes designed?
+
+**Conclusion**: Sequential by default. Opt-in parallel with `Intent.all()` (fail-fast) and `Intent.allSettled()` (independent).
+
+Most user actions are sequential: validate, then save, then confirm. Making sequential the default (`Intent(A, B, C)`) means the common case needs no extra syntax.
+
+When parallel execution is needed (loading multiple independent resources), `Intent.all()` provides fail-fast semantics (abort all if one fails) and `Intent.allSettled()` provides independent semantics (each runs to completion).
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Parallel by default | Most real-world intents are sequential. Parallel-by-default would require explicit sequencing for the common case. |
+| Single parallel mode | `all` and `allSettled` serve genuinely different needs. A dashboard loading independent widgets should not abort all widgets if one fails. A checkout flow should abort if validation fails. |
+| Execution mode on the executor, not the intent | The same command might appear in both sequential and parallel intents. Execution mode is a property of the intent, not the command. |
+
+---
+
+## 6. How do you migrate from existing architectures?
+
+**Conclusion**: Adapter pattern first, then gradual migration.
+
+Hurum does not require a big-bang rewrite. The recommended migration path:
+
+1. **Wrap existing stores** with a thin adapter that exposes a Hurum-compatible interface.
+2. **Write new features** using Hurum stores.
+3. **Migrate existing features** one at a time, starting with the most isolated ones.
+4. **Remove adapters** once all features are migrated.
+
+This works because Hurum stores are self-contained. A Hurum store and a legacy Redux store can coexist in the same application. Data flows between them through explicit adapters, not implicit global state.
+
+| Rejected Alternative | Why Rejected |
+|----------------------|--------------|
+| Big-bang migration | Too risky for production applications. Requires rewriting all state management at once. |
+| Compatibility layer that makes Hurum look like Redux | Defeats the purpose. Hurum's data flow is intentionally different. Hiding it behind Redux semantics would lose the architectural benefits. |
+| Automatic migration tools | The conceptual mapping between Redux actions and Hurum's Command/Event split is not mechanical. It requires understanding the domain. |
+
+---
+
+## 7. Why these names?
+
+**Conclusion**: Each name was chosen for precision and minimal ambiguity.
+
+| Name | Why this name | What it replaces |
+|------|---------------|------------------|
+| **Intent** | Represents user intention, not a technical instruction. "Submit clicked" is an intent. | Action, Dispatch, Thunk |
+| **Command** | An imperative instruction to a specific executor. Clear that it triggers side effects. | Action creator, Saga trigger |
+| **CommandExecutor** | Executes a command. The name says exactly what it does. | Middleware, Saga, Epic, Thunk |
+| **Event** | A past-tense fact. "Saved", "Failed", "Loaded". Universally understood in event sourcing. | Action, Mutation |
+| **Store** | Standard term across state management. No reason to rename it. | Store, Atom, Signal |
+| **Computed** | Derived state that is computed from raw state. Direct and familiar. | Selector, Derived, Getter |

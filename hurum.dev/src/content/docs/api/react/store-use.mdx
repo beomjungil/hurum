@@ -1,0 +1,138 @@
+---
+title: "useStore().use.*"
+description: "API reference for the per-field subscription hooks via useStore()."
+---
+
+```tsx
+import { useStore } from '@hurum/react'
+```
+
+## `useStore(def).use.fieldName()`
+
+Per-field subscription hooks accessed via the `useStore()` return value. One hook per state field (raw, computed, and resolved nested).
+
+### Setup
+
+```ts
+import { Store } from '@hurum/core'
+
+const CartStore = Store({ state: { items: [] as CartItem[], taxRate: 0.1 } })
+  .computed({ total: (s) => s.items.reduce((sum, i) => sum + i.price, 0) })
+  .intents(CartIntents)
+  .executors(AddItemExec)
+
+// In a component:
+// const cart = useStore(CartStore)
+// cart.use.items, cart.use.taxRate, cart.use.total are available
+```
+
+### Signature
+
+```ts
+const store = useStore(StoreDef)
+store.use.fieldName(): FieldType
+```
+
+Each property on `store.use` is a React hook function. Calling it subscribes the component to that specific field.
+
+### Example
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const items = cart.use.items()
+  return <span>{items.length}</span>
+}
+
+function CartTotal() {
+  const cart = useStore(CartStore)
+  const total = cart.use.total()
+  return <span>${total.toFixed(2)}</span>
+}
+```
+
+---
+
+## `useStore(def).useSelector(fn)`
+
+Derived state hook. Reads from the resolved store instance (scoped or singleton).
+
+### Signature
+
+```ts
+const store = useStore(StoreDef)
+store.useSelector<T>(fn: (state: State) => T): T
+store.useSelector<T>(selector: Selector<T>): T
+```
+
+### Example
+
+```tsx
+function ExpensiveItems() {
+  const cart = useStore(CartStore)
+  const expensive = cart.useSelector(
+    (state) => state.items.filter((i) => i.price > 100)
+  )
+  return <ul>{expensive.map((i) => <li key={i.id}>{i.name}</li>)}</ul>
+}
+```
+
+---
+
+## `useStore(def).send`
+
+Send proxy for the resolved store instance. Dispatches intents.
+
+### Example
+
+```tsx
+function AddButton({ item }: { item: CartItem }) {
+  const cart = useStore(CartStore)
+  return (
+    <button onClick={() => cart.send.addItem({ item })}>
+      Add to Cart
+    </button>
+  )
+}
+```
+
+---
+
+## Resolution Behavior
+
+The hooks on the `useStore()` return value are context-aware:
+
+- **Inside a `StoreProvider`**: Reads from the scoped instance provided by the nearest matching provider.
+- **Outside a `StoreProvider`**: Falls back to the global singleton instance (created lazily on first access).
+
+### Context-Aware Comparison
+
+| API | Reads from | Use case |
+|-----|------------|----------|
+| `useStore(CartStore).use.items()` | Nearest StoreProvider or singleton | Scoped instances, SSR, testing, general use |
+
+### When to use
+
+- The component may run inside a StoreProvider with a different instance.
+- You need SSR support (singletons are client-only).
+- You need testability with isolated store instances.
+- You want context-aware resolution (recommended default).
+
+---
+
+## How It Works
+
+Each `store.use.fieldName` hook uses `useSyncExternalStore` internally:
+1. It resolves the store instance (from context or singleton).
+2. It subscribes to the store's state changes.
+3. The snapshot function reads only the specific field from `store.getState()`.
+
+This means components only re-render when their subscribed field actually changes, not on every state update.
+
+---
+
+## Notes
+
+- The hooks follow the rules of hooks. Do not call them conditionally.
+- Hooks are cached per field name. Accessing `store.use.items` multiple times returns the same hook function.
+- When outside a StoreProvider, the singleton is created on first access. On the server, a dev warning is logged because singletons are client-only. Use `StoreProvider` + `Store.create()` for SSR.

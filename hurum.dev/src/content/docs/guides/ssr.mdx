@@ -1,0 +1,255 @@
+---
+title: "Server-Side Rendering"
+description: "Use Hurum with SSR frameworks like Next.js using Provider and Store.create()."
+---
+
+> [!TIP] Before reading
+> This guide builds on [React overview](/react/overview/) and [Provider](/react/provider/). Read those first if you haven't.
+
+Hurum works with server-side rendering frameworks like Next.js, Remix, and Astro. The key rule: **never use the global singleton on the server.** Create a fresh store instance per request using `Store.create()` and wrap your components with `Provider`.
+
+## Why singletons don't work on the server
+
+On the client, Hurum stores are singletons by default. You define a store once and import it everywhere. This is convenient for SPAs where each user has their own browser tab.
+
+On the server, multiple users share the same Node.js process. A global singleton would leak state between requests. User A's data would bleed into User B's response.
+
+Hurum warns you in development if you try to access a singleton on the server:
+
+```
+[hurum] Singleton store accessed on the server. Use Store.create() with Provider instead.
+```
+
+## The SSR pattern
+
+The pattern is:
+1. Server Component: fetch data, create a store instance, pass it to Provider
+2. Client Component: use `useStore()` to read and interact with the store
+
+### Next.js App Router
+
+```tsx
+// app/purchase/[id]/page.tsx — Server Component
+import { PurchaseStore } from './store'
+import { PurchaseClient } from './client'
+import { CurrencyService } from '@/services/currency'
+import { fetchPurchase } from '@/api/purchases'
+
+export default async function PurchasePage({
+  params,
+}: {
+  params: { id: string }
+}) {
+  const purchase = await fetchPurchase(params.id)
+
+  return (
+    <PurchaseStore.Provider
+      store={PurchaseStore.create({
+        initialState: {
+          purchase,
+          loading: false,
+          saving: false,
+          error: null,
+        },
+        deps: {
+          purchaseRepository: new HttpPurchaseRepository(),
+          currencyService: new CurrencyService(),
+        },
+      })}
+    >
+      <PurchaseClient />
+    </PurchaseStore.Provider>
+  )
+}
+```
+
+```tsx
+// app/purchase/[id]/client.tsx — Client Component
+'use client'
+
+import { useStore } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+export function PurchaseClient() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h1>{purchase?.name}</h1>
+      <button
+        onClick={() => store.send.saveClicked({ purchase: purchase! })}
+        disabled={saving}
+      >
+        {saving ? 'Saving...' : 'Save'}
+      </button>
+    </div>
+  )
+}
+```
+
+The server fetches the data and pre-populates the store. The client component picks up that state and can interact with it normally.
+
+### The store definition
+
+The store definition itself is shared between server and client. It does not hold any state:
+
+```ts
+// app/purchase/[id]/store.ts
+import { Store, Events, Event, CommandExecutor, Intents, Intent } from '@hurum/core'
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+
+const [SaveCommand, SaveExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+  if (signal.aborted) return
+  const result = await deps.purchaseRepository.save(command.purchase)
+  if (signal.aborted) return
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SaveCommand),
+})
+
+export const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    loading: true,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SaveExecutor)
+  .deps<{
+    purchaseRepository: PurchaseRepository
+    currencyService: CurrencyService
+  }>()
+```
+
+The `Store()` call creates a definition (a blueprint). It has no state until you call `.create()`.
+
+## Store.create() options
+
+### initialState (deep merge)
+
+`initialState` is deep-merged with the store's default state. You only need to provide the fields that differ:
+
+```ts
+// Store default: { purchase: null, loading: true, saving: false, error: null }
+
+PurchaseStore.create({
+  initialState: {
+    purchase: fetchedPurchase,
+    loading: false,
+  },
+})
+// Result: { purchase: fetchedPurchase, loading: false, saving: false, error: null }
+```
+
+Fields you don't specify keep their default values.
+
+### deps (shallow merge)
+
+`deps` is shallow-merged. Each key replaces the default entirely:
+
+```ts
+PurchaseStore.create({
+  deps: {
+    purchaseRepository: new HttpPurchaseRepository('/api/v2'),
+    currencyService: new CurrencyService('EUR'),
+  },
+})
+```
+
+## Provider does not auto-dispose
+
+The `Provider` component does **not** automatically dispose the store when it unmounts. This is intentional for React Strict Mode compatibility, where components mount and unmount twice in development.
+
+If you need cleanup, dispose the store explicitly:
+
+```tsx
+function PurchasePage() {
+  const storeRef = useRef(
+    PurchaseStore.create({
+      initialState: { ... },
+      deps: { ... },
+    })
+  )
+
+  useEffect(() => {
+    return () => {
+      storeRef.current.dispose()
+    }
+  }, [])
+
+  return (
+    <PurchaseStore.Provider store={storeRef.current}>
+      <PurchaseClient />
+    </PurchaseStore.Provider>
+  )
+}
+```
+
+For server-created stores (passed as props from Server Components), disposal is not needed because the store lives for the lifetime of the page.
+
+## Multiple stores on one page
+
+Each store gets its own Provider. They are independent:
+
+```tsx
+export default async function Dashboard() {
+  const purchases = await fetchRecentPurchases()
+  const stats = await fetchStats()
+
+  return (
+    <PurchaseListStore.Provider
+      store={PurchaseListStore.create({ initialState: { purchases } })}
+    >
+      <StatsStore.Provider
+        store={StatsStore.create({ initialState: { stats } })}
+      >
+        <DashboardClient />
+      </StatsStore.Provider>
+    </PurchaseListStore.Provider>
+  )
+}
+```
+
+## Key points
+
+- **Always use `Store.create()` for SSR.** Never access the global singleton on the server.
+- **`initialState` deep merges** with store defaults. Only provide the fields you need to override.
+- **`deps` shallow merges** with defaults. Each key replaces the previous value entirely.
+- **Provider does not auto-dispose.** This is by design for Strict Mode compatibility.
+- **Store definitions are safe to share.** The `Store()` builder has no state. Only `.create()` produces a stateful instance.
+- **One Provider per store type.** Nest them if a page needs multiple stores.

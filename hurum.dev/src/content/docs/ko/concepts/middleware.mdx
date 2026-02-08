@@ -1,0 +1,180 @@
+---
+title: Middleware
+description: Middleware는 로깅, 개발자 도구, 분석을 위한 순수 옵저버예요. 상태를 수정할 수 없어요.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip" title="먼저 읽기">
+이 페이지는 [Store](/ko/concepts/store/)와 [Event](/ko/concepts/event/)에 대한 이해를 전제로 해요. 아직 읽지 않았다면 먼저 읽어주세요.
+</Aside>
+
+Middleware는 Store를 변경하지 않고 관찰하는 읽기 전용 옵저버예요. 로깅, 분석, 개발자 도구 통합, 영속화에 적합한 장소예요.
+
+```ts
+import { type Middleware } from '@hurum/core'
+
+const analytics = (): Middleware => ({
+  name: 'analytics',
+  onEvent: (event, state) => {
+    trackEvent(event.type, event)
+  },
+  onError: (error, context) => {
+    reportError(error, { intent: context.intent })
+  },
+})
+
+// Register in the store builder chain
+const MyStore = Store({ state: { count: 0 } })
+  .on({ /* ... */ })
+  .intents(MyIntents)
+  .executors(MyExecutor)
+  .middleware(logger(), devtools(), analytics())
+```
+
+## 동작 방식
+
+Middleware는 `name`과 하나 이상의 선택적 훅 메서드를 가진 객체예요. Store 빌더 체인의 끝에서 `.middleware()`로 등록해요.
+
+Middleware 훅은 액션이 이미 발생한 **후에** 호출돼요. 결과를 관찰하는 거지 -- 무언가를 방지하거나, 수정하거나, 가로챌 수 없어요.
+
+### Middleware 인터페이스
+
+```ts
+interface Middleware {
+  name: string
+  onEvent?(event: StoreEvent, state: State): void
+  onStateChange?(prevState: State, nextState: State): void
+  onIntentStart?(intent: string, payload: unknown): void
+  onIntentEnd?(intent: string, payload: unknown): void
+  onError?(error: Error, context: ErrorContext): void
+}
+```
+
+| 훅 | 호출 시점 | 인자 |
+|------|------------|-----------|
+| `onEvent` | Event가 emit되고 상태가 업데이트된 후 | Event 객체, 새 상태 |
+| `onStateChange` | 상태가 변경된 후 (Computed 재계산 포함) | 이전 상태, 다음 상태 |
+| `onIntentStart` | Intent 실행이 시작될 때 | Intent 이름, 페이로드 |
+| `onIntentEnd` | Intent가 완료될 때 (성공 또는 실패) | Intent 이름, 페이로드 |
+| `onError` | Executor에서 에러가 발생할 때 | 에러, Intent 정보가 담긴 컨텍스트 |
+
+### 실행 순서
+
+Middleware 훅은 intent 라이프사이클의 특정 시점에 호출돼요:
+
+```
+store.send(intent)
+  → onIntentStart
+    → executor 실행
+      → emit(event)
+        → Store.on 핸들러 실행 (상태 업데이트)
+        → onEvent
+        → onStateChange
+    → (executor 완료)
+  → onIntentEnd
+```
+
+executor가 에러를 던지면 `onIntentEnd` 대신 `onError`가 호출돼요.
+
+### 다중 Middleware
+
+여러 Middleware를 등록할 수 있어요. 등록된 순서대로 호출돼요:
+
+```ts
+.middleware(
+  logger(),      // called first
+  devtools(),    // called second
+  analytics(),   // called third
+)
+```
+
+## 자주 사용되는 패턴
+
+### 로깅 Middleware
+
+```ts
+const logger = (): Middleware => ({
+  name: 'logger',
+  onEvent: (event, state) => {
+    console.log(`[Event] ${event.type}`, event)
+  },
+  onStateChange: (prev, next) => {
+    console.log('[State]', { prev, next })
+  },
+  onIntentStart: (intent, payload) => {
+    console.log(`[Intent Start] ${intent}`, payload)
+  },
+  onIntentEnd: (intent, payload) => {
+    console.log(`[Intent End] ${intent}`, payload)
+  },
+  onError: (error, context) => {
+    console.error(`[Error] in ${context.intent}:`, error)
+  },
+})
+```
+
+### 분석 Middleware
+
+```ts
+const analyticsMiddleware = (tracker: AnalyticsTracker): Middleware => ({
+  name: 'analytics',
+  onEvent: (event) => {
+    // Track specific events
+    if (event.type.startsWith('Checkout/')) {
+      tracker.track(event.type, event)
+    }
+  },
+  onError: (error, context) => {
+    tracker.trackError(error, {
+      intent: context.intent,
+      timestamp: Date.now(),
+    })
+  },
+})
+```
+
+### 영속화 Middleware
+
+```ts
+const persist = (storageKey: string): Middleware => ({
+  name: 'persist',
+  onStateChange: (_prev, next) => {
+    localStorage.setItem(storageKey, JSON.stringify(next))
+  },
+})
+```
+
+### 조건부 Middleware
+
+Middleware는 단순한 객체이므로, 조건부로 포함할 수 있어요:
+
+```ts
+const MyStore = Store({ state: { /* ... */ } })
+  .on({ /* ... */ })
+  .middleware(
+    ...[
+      process.env.NODE_ENV === 'development' && logger(),
+      process.env.NODE_ENV === 'development' && devtools(),
+      analytics(),
+    ].filter(Boolean) as Middleware[],
+  )
+```
+
+## 내장 Middleware
+
+Hurum은 여러 내장 Middleware를 제공해요:
+
+| Middleware | 목적 |
+|-----------|---------|
+| `logger()` | Event, 상태 변경, Intent, 에러를 콘솔에 로깅 |
+| `devtools()` | 타임 트래블 디버깅을 위한 브라우저 개발자 도구와 통합 |
+| `persist()` | localStorage 또는 커스텀 스토리지 백엔드에 상태 영속화 |
+| `undoRedo()` | 실행 취소/다시 실행 지원을 위한 상태 히스토리 추적 |
+
+## 팁
+
+- **Middleware는 상태를 수정할 수 없어요.** Event에 반응해서 새로운 동작을 트리거해야 한다면, [relay](/ko/concepts/nested-store/)를 사용하거나 Executor에서 추가 Event를 emit하세요. Middleware는 순수하게 관찰 전용이에요.
+- **Middleware는 가볍게 유지하세요.** Middleware 훅은 상태 업데이트 경로에서 동기적으로 실행돼요. 무거운 계산(예: 영속화를 위한 대규모 상태 직렬화)은 `requestIdleCallback` 등으로 지연시켜야 해요.
+- **`name`은 디버깅에 활용하세요.** `name` 프로퍼티는 에러 메시지와 개발자 도구에서 어떤 Middleware인지 식별하는 데 도움이 돼요.
+- **비즈니스 로직을 Middleware에 넣지 마세요.** 발생한 일을 로깅하는 건 괜찮아요. 다음에 무엇이 일어나야 하는지를 결정하는 건 Executor와 relay 핸들러의 역할이에요.

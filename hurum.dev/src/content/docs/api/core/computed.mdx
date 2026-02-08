@@ -1,0 +1,139 @@
+---
+title: Computed
+description: "API reference for computed state definitions."
+---
+
+Computed fields are derived state that automatically recalculates when dependencies change. They are defined via `.computed()` in the Store builder.
+
+```ts
+import { Store } from '@hurum/core'
+```
+
+## Definition
+
+```ts
+.computed({
+  key: (state) => derivedValue,
+})
+```
+
+### Signature
+
+```ts
+.computed<C extends Record<string, (state: ResolvedState) => unknown>>(
+  def: C,
+): StoreBuilder
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `def` | `Record<string, (state) => T>` | A map of field names to derivation functions. Each function receives the full resolved state (raw + other computed + nested). |
+
+### Example
+
+```ts
+const CartStore = Store({
+  state: {
+    items: [] as CartItem[],
+    taxRate: 0.1,
+  },
+})
+.computed({
+  subtotal: (state) => state.items.reduce((sum, i) => sum + i.price * i.qty, 0),
+  tax: (state) => state.subtotal * state.taxRate,
+  total: (state) => state.subtotal + state.tax,
+})
+```
+
+In this example, `tax` depends on `subtotal`, and `total` depends on both. Hurum resolves the evaluation order automatically via topological sort.
+
+---
+
+## Behavior
+
+### Proxy-based Dependency Tracking
+
+When a computed function runs for the first time, Hurum wraps the state in a tracking proxy. Every property access is recorded as a dependency. On subsequent evaluations, only computed fields whose dependencies have changed are recalculated.
+
+```ts
+// This computed only re-evaluates when `items` changes
+.computed({
+  itemCount: (state) => state.items.length,
+})
+```
+
+If a computed function conditionally accesses different fields, the dependency set is updated on each evaluation.
+
+### Eager Recalculation
+
+Computed values are recalculated immediately when an event changes their dependencies. They are always up-to-date when read via `store.getState()`.
+
+### Structural Equality
+
+If recalculation produces a value structurally equal to the previous one, the old reference is kept. This prevents unnecessary re-renders in React when computed values are objects or arrays.
+
+```ts
+// If items hasn't changed, the same array reference is returned
+.computed({
+  sortedItems: (state) => [...state.items].sort((a, b) => a.name.localeCompare(b.name)),
+})
+```
+
+Structural equality works for primitives, plain objects, and arrays (compared recursively).
+
+### Circular Dependency Detection
+
+Circular dependencies between computed fields are detected at store creation time and throw an error.
+
+```ts
+// This throws: "Circular dependency detected in computed fields: a"
+.computed({
+  a: (state) => state.b + 1,
+  b: (state) => state.a + 1,
+})
+```
+
+---
+
+## Computed and Nested State
+
+Computed functions can read nested child store state. When a child store's state changes, any parent computed field that depends on the nested key is recalculated.
+
+```ts
+const ParentStore = Store({
+  state: {
+    transaction: Nested(TransactionStore),
+  },
+})
+.computed({
+  isComplete: (state) => state.transaction.status === 'complete',
+})
+```
+
+---
+
+## Computed in `on` Handlers
+
+State passed to `on` handlers includes computed values. This allows handlers to read derived state when deciding how to transition.
+
+```ts
+.on(CartEvent.itemAdded, (state, { item }) => ({
+  ...state,
+  items: [...state.items, item],
+  // state.total is available here (from computed)
+  lastTotal: state.total,
+}))
+```
+
+The return value of `on` handlers must contain only raw state fields. Computed fields are stripped automatically.
+
+---
+
+## Notes
+
+- Computed fields appear alongside raw fields in `store.getState()`. There is no separate accessor.
+- Computed functions must be pure. They should not have side effects.
+- The dependency tracking only captures top-level property accesses on the state object. Accessing `state.items[0].price` tracks `items`, not individual array elements.
+- Computed definitions are additive. Calling `.computed()` multiple times merges the definitions (later calls override duplicate keys).

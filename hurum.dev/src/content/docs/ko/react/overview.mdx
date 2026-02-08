@@ -1,0 +1,107 @@
+---
+title: "React 통합"
+description: "@hurum/react가 프레임워크 독립적인 Store를 React의 렌더링 모델과 연결하는 방법이에요."
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## 별도의 패키지가 필요한 이유
+
+`@hurum/core`는 프레임워크 독립적이에요. React, Vue 또는 어떤 UI 라이브러리도 알지 못해요. Store는 `subscribe()` + `getState()` 인터페이스를 제공해요 — 외부 상태를 위한 표준 계약이에요.
+
+`@hurum/react`는 이 인터페이스를 React와 연결해요. 구체적으로는:
+
+1. **티어링을 방지해요.** React 18은 렌더링을 중단하고 재개할 수 있어요 (동시성 모드). `useSyncExternalStore` 없이는, 동일한 Store를 읽는 두 컴포넌트가 단일 렌더링 패스 내에서 서로 다른 상태를 볼 수 있어요. `@hurum/react`는 모든 구독에 `useSyncExternalStore`를 사용하므로 이런 일이 절대 발생하지 않아요.
+
+2. **세밀한 구독을 제공해요.** Hurum Store는 많은 필드를 포함해요. 컴포넌트가 `count`만 읽는다면, `multiplier`가 변경될 때 리렌더링되어서는 안 돼요. `.use.count()` hook은 정확히 하나의 필드만 구독해요 — 전체 상태 객체가 아닌 필드별 구조적 동등성이에요.
+
+3. **Store 생명주기를 관리해요.** 일부 Store는 전역적이에요 (앱당 하나). 다른 것들은 범위가 지정돼요 (페이지당 하나, 리스트 항목당 하나, 모달당 하나). `@hurum/react`는 두 패턴을 모두 제공해요: `useStore()`의 싱글턴 폴백과 `StoreProvider` 기반 스코프 인스턴스.
+
+## @hurum/react가 제공하는 것
+
+`@hurum/react`는 세 가지 API를 제공해요. 별도의 래핑 단계 없이, Store 정의를 그대로 사용해요:
+
+```tsx
+import { useStore, StoreProvider, withProvider } from '@hurum/react'
+```
+
+| API | 설명 |
+|-----|------|
+| `useStore(def)` | Context 인식 hook. Provider 내부 → 스코프 인스턴스, 외부 → 싱글턴 폴백 |
+| `useStore(instance)` | 주어진 StoreInstance를 직접 사용하는 오버로드 |
+| `StoreProvider` | 스코프 인스턴스를 자식 컴포넌트에 제공하는 Provider |
+| `withProvider(Def, Component)` | 마운트마다 새 인스턴스를 자동 생성하는 HOC |
+
+## 두 가지 접근 패턴
+
+React 앱은 전역 상태와 범위 지정 상태를 모두 필요로 해요. Hurum은 미리 하나를 선택하도록 강요하지 않고 둘 다 지원해요.
+
+### 싱글턴 폴백 — 전역 상태
+
+진정으로 앱 전체에 걸친 상태(인증, 테마, 기능 플래그)의 경우, 모든 컴포넌트에서 공유되는 하나의 인스턴스를 원해요. Provider 의식도, 컨텍스트 배관도 필요 없어요.
+
+```tsx
+import { useStore } from '@hurum/react'
+import { AuthStore } from './store'
+
+function UserMenu() {
+  const store = useStore(AuthStore)
+  const user = store.use.currentUser()
+  const loggedIn = store.use.isLoggedIn()  // computed
+
+  if (!loggedIn) return <LoginButton />
+  return <span>Hello, {user.name}</span>
+}
+```
+
+`useStore(AuthStore)`를 Provider 외부에서 호출하면 첫 번째 접근 시 지연 생성되는 전역 싱글턴 인스턴스를 반환해요. 설정이 필요 없어요.
+
+### Context-aware — useStore + StoreProvider
+
+전역이 아닌 상태 — 구매 폼, 차트 위젯, 자식 항목이 있는 중첩 Store — 의 경우, 독립적인 인스턴스가 필요해요. `StoreProvider`는 범위 경계를 생성하고, `useStore()`는 가장 가까운 인스턴스를 해결해요.
+
+```tsx
+import { useStore, StoreProvider } from '@hurum/react'
+import { PurchaseStore } from './store'
+
+function PurchaseContent() {
+  const store = useStore(PurchaseStore)
+  const purchase = store.use.purchase()
+  const saving = store.use.saving()
+
+  return (
+    <div>
+      <h2>{purchase?.name}</h2>
+      {saving && <p>Saving...</p>}
+      <button onClick={() => store.send.submitClicked({ purchase })}>
+        Submit
+      </button>
+    </div>
+  )
+}
+```
+
+`useStore()`는 컴포넌트 트리에서 `StoreProvider`를 확인해요. 발견되면 범위 지정 인스턴스를 반환해요. 그렇지 않으면 전역 싱글턴으로 폴백해요. 즉, 동일한 컴포넌트가 두 컨텍스트에서 모두 작동해요 — 외부에서 경계를 결정해요.
+
+## 언제 어떤 것을 사용할까
+
+| 시나리오 | 패턴 | 이유 |
+|----------|---------|-----|
+| Auth, 테마, 기능 플래그 | `useStore(Def)` 싱글턴 폴백 | 앱당 하나의 인스턴스. 격리가 필요 없음. |
+| 서버 데이터가 있는 페이지 레벨 상태 | `StoreProvider` + `useStore` | 각 페이지는 자체 초기 상태와 deps가 필요. |
+| 재사용 가능한 컴포넌트 (차트, 폼, 위젯) | `StoreProvider` + `useStore` | 동일한 컴포넌트, 여러 독립적인 인스턴스. |
+| Nested Store (`Nested.array`, `Nested.map`) | `StoreProvider` + `useStore` | 부모와 자식은 범위 지정 생명주기가 필요. |
+| SSR | `StoreProvider` + `Store.create()` | 서버에는 전역이 없음. 각 요청 = 새 인스턴스. |
+| 빠른 프로토타입 | `useStore(Def)` 싱글턴 폴백 | 적은 의식. 필요할 때 Provider로 전환. |
+
+앱 전체 Store에는 싱글턴 폴백으로 시작하세요. 여러 인스턴스, 서버 데이터 또는 중첩 Store가 필요한 순간 `StoreProvider`를 사용하세요.
+
+<Aside type="tip">
+  동일한 앱에서 두 패턴을 모두 사용할 수 있어요. `useStore(Def)`는 context를 인식해서, Provider 내부에서는 스코프 인스턴스를, 외부에서는 싱글턴을 자동으로 반환해요.
+</Aside>
+
+## 다음 단계
+
+- [useStore](/ko/react/use-store/) — Context-aware Store 접근, handle API, 언제 사용할지
+- [Provider & withProvider](/ko/react/provider/) — 범위 지정 인스턴스, 중첩 Store, 실제 사용 사례
+- [Scoped Instances](/ko/react/scoped-instances/) — Store.create(), 폐기, SSR

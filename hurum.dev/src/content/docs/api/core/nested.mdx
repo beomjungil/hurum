@@ -1,0 +1,208 @@
+---
+title: Nested
+description: "API reference for Nested, Nested.array, and Nested.map."
+---
+
+```ts
+import { Nested } from '@hurum/core'
+```
+
+Nested stores allow a parent store to compose child stores as part of its state tree. There are three variants for different cardinalities.
+
+## `Nested(storeDefinition)`
+
+Declares a single nested child store. Exactly one child instance is created when the parent store is created.
+
+### Signature
+
+```ts
+function Nested<TStore>(store: TStore): NestedMarker<TStore, 'single'>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `StoreDefinition` | The child store definition. |
+
+### Example
+
+```ts
+const OrderStore = Store({
+  state: {
+    orderId: '',
+    transaction: Nested(TransactionStore),
+  },
+})
+```
+
+---
+
+## `Nested.array(storeDefinition)`
+
+Declares an array of nested child stores. Each item is identified by its `id` field. Items are dynamically added and removed as the parent's raw state array changes.
+
+### Signature
+
+```ts
+Nested.array<TStore>(store: TStore): NestedMarker<TStore, 'array'>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `StoreDefinition` | The child store definition. Each child must have an `id` field in its state. |
+
+### Example
+
+```ts
+const TodoListStore = Store({
+  state: {
+    todos: Nested.array(TodoStore),
+  },
+})
+```
+
+Child stores are reconciled against the raw state array by `id`:
+- New items in the array create new child instances.
+- Removed items dispose their child instances.
+- Existing items retain their child instances (no re-creation).
+
+---
+
+## `Nested.map(storeDefinition)`
+
+Declares a keyed map of nested child stores. Keys are strings. Items are dynamically added and removed as the parent's raw state record changes.
+
+### Signature
+
+```ts
+Nested.map<TStore>(store: TStore): NestedMarker<TStore, 'map'>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `store` | `StoreDefinition` | The child store definition. |
+
+### Example
+
+```ts
+const DashboardStore = Store({
+  state: {
+    panels: Nested.map(PanelStore),
+  },
+})
+```
+
+---
+
+## State Resolution
+
+Nested child state is included in the parent's combined state returned by `getState()`:
+
+| Nested Type | State Shape |
+|-------------|-------------|
+| `Nested(Child)` | `{ childKey: ChildState }` |
+| `Nested.array(Child)` | `{ childKey: ChildState[] }` |
+| `Nested.map(Child)` | `{ childKey: Record<string, ChildState> }` |
+
+The resolved state includes the child's raw state and computed values.
+
+---
+
+## Scope Access
+
+Access child store instances via `store.scope`:
+
+```ts
+const store = OrderStore.create()
+
+// Single: direct instance
+store.scope.transaction.send(TransactionIntents.start({ amount: 100 }))
+
+// Array: array of instances
+store.scope.todos.forEach((todo) => {
+  todo.send(TodoIntents.markDone())
+})
+
+// Map: Map<string, StoreInstance>
+const panel = store.scope.panels.get('sidebar')
+panel?.send(PanelIntents.toggle())
+```
+
+| Nested Type | `scope` Type |
+|-------------|--------------|
+| `Nested(Child)` | `StoreInstance` |
+| `Nested.array(Child)` | `StoreInstance[]` |
+| `Nested.map(Child)` | `Map<string, StoreInstance>` |
+
+Scope is also available in executors via `context.scope`.
+
+---
+
+## Event Communication
+
+### Forwarding (parent to children)
+
+When the parent store applies an event, it is forwarded to all child stores. If a child has an `on` handler for that event type, the child's state updates.
+
+### Bubbling (children to parent)
+
+When a child store emits an event, the event bubbles up to the parent. Parent event subscribers (`subscribe('events', cb)`) receive it, and parent `relay` handlers can react to it.
+
+### Relay
+
+Use `.relay()` on the parent to transform child events into parent events:
+
+```ts
+.relay(TodoEvent.completed, (event, state) => {
+  const allDone = state.todos.every((t) => t.completed)
+  return allDone ? [TodoListEvent.allCompleted()] : []
+})
+```
+
+---
+
+## Dependency Injection for Children
+
+Use `.childDeps()` to map parent dependencies to child dependencies:
+
+```ts
+const ParentStore = Store({ state: { child: Nested(ChildStore) } })
+  .deps<{ api: ApiClient }>()
+  .childDeps('child', (parentDeps) => ({
+    childApi: parentDeps.api.child,
+  }))
+```
+
+---
+
+## Initialization
+
+For `Nested.array` and `Nested.map`, provide initial data via `Store.create({ initialState })`:
+
+```ts
+const store = TodoListStore.create({
+  initialState: {
+    todos: [
+      { id: '1', title: 'Buy milk', completed: false },
+      { id: '2', title: 'Write docs', completed: true },
+    ],
+  },
+})
+```
+
+Each item in the array creates a child store instance with that item as `initialState`.
+
+---
+
+## Notes
+
+- `Nested.array` children must have an `id` field. This is required for reconciliation.
+- Child `on` handlers for `Nested.array` should guard by id: `if (state.id !== payload.id) return state`.
+- Parent disposal cascades to all nested children.
+- Relay depth is limited to 5 by default. Depth beyond 3 triggers a dev warning.
+- Event forwarding is unidirectional per event: a forwarded event does not bubble back.

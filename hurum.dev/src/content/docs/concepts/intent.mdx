@@ -1,0 +1,159 @@
+---
+title: Intent
+description: Intents map user actions to the commands that should run.
+---
+
+> [!TIP] Before reading
+> This page assumes familiarity with [CommandExecutor](/concepts/command-executor/). Read that first if you haven't.
+
+An Intent is a declarative mapping from a user action to one or more commands. It is what you call from your UI -- the entry point into Hurum's data flow.
+
+```ts
+import { Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  submitButtonClicked: Intent(ValidateCommand, SavePurchaseCommand),
+  pageOpened: Intent(LoadPurchaseCommand),
+  cancelClicked: Intent(CancelCommand),
+})
+
+// Send from your UI
+PurchaseStore.send.submitButtonClicked({ id: '123' })
+```
+
+## How it works
+
+`Intent(Step1, Step2, ...)` creates a sequential intent. Each step can be a `Command` (dispatched to its executor) or an `EventCreator` (emitted directly). When triggered, steps run in order. If one throws, the rest are skipped.
+
+`Intents()` groups related intents under a namespace, similar to how `Events()` groups events. Each key becomes a method on `store.send`:
+
+```ts
+const CounterIntents = Intents('Counter', {
+  plusClicked: Intent(IncrementCommand),
+  minusClicked: Intent(DecrementCommand),
+  resetClicked: Intent(ResetCommand),
+})
+
+// After registering with a Store:
+CounterStore.send.plusClicked({ amount: 1 })
+CounterStore.send.resetClicked({})
+```
+
+The payload you pass to `send` is forwarded to **every** step in the intent. TypeScript checks that the payload type is compatible with all steps at compile time.
+
+### Direct event emission
+
+For simple state transitions that just map a payload to an event, you can pass an `EventCreator` directly to `Intent()` — no `CommandExecutor` or executor registration needed:
+
+```ts
+const FormIntents = Intents('ContactForm', {
+  // EventCreator steps — emit directly, no executor needed
+  nameChanged: Intent(FormEvent.nameChanged),
+  emailChanged: Intent(FormEvent.emailChanged),
+
+  // Command steps — for async logic, deps access, etc.
+  submitted: Intent(ValidateFormCommand, SubmitFormCommand),
+})
+```
+
+This eliminates the need for a `CommandExecutor` for identity cases (where the payload maps 1:1 to the event). If you need to transform the payload or access dependencies, use a `CommandExecutor` instead.
+
+### Execution strategies
+
+Hurum provides three strategies for running multiple commands:
+
+```ts
+const AppIntents = Intents('App', {
+  // Sequential (default) -- run one after another, stop on first error
+  submit: Intent(ValidateCommand, SaveCommand),
+
+  // Parallel fail-fast -- run all at once, abort others on first error
+  quickSubmit: Intent.all(ValidateCommand, SaveCommand),
+
+  // Parallel independent -- run all at once, each completes regardless
+  initialize: Intent.allSettled(
+    LoadCurrencyCommand,
+    LoadVATCommand,
+    LoadPurchaseCommand,
+  ),
+})
+```
+
+| Strategy | Execution | On error |
+|----------|-----------|----------|
+| `Intent(A, B, C)` | A, then B, then C | Stop. B and C don't run. |
+| `Intent.all(A, B, C)` | A, B, C simultaneously | Abort the others. |
+| `Intent.allSettled(A, B, C)` | A, B, C simultaneously | Others continue. |
+
+> A, B, C can each be a `Command` or an `EventCreator`. You can mix them freely.
+
+### Cancellation
+
+Intents support manual cancellation via `store.cancel(ref)` for a specific intent or `store.cancelAll()` for everything:
+
+```ts
+// Cancel a specific intent
+const ref = PurchaseStore.send.submitButtonClicked({ id: '123' })
+PurchaseStore.cancel(ref)
+
+// Cancel all running executors
+PurchaseStore.cancelAll()
+```
+
+When an executor is cancelled, its `signal.aborted` becomes `true` and any events emitted after that point are silently ignored.
+
+## Common patterns
+
+### Page lifecycle intents
+
+```ts
+const PageIntents = Intents('ProductPage', {
+  // Load everything the page needs
+  opened: Intent.allSettled(
+    LoadProductCommand,
+    LoadReviewsCommand,
+    LoadRecommendationsCommand,
+  ),
+
+  // Clean up on leave
+  closed: Intent(CleanupCommand),
+})
+```
+
+### Form submission
+
+```ts
+const FormIntents = Intents('ContactForm', {
+  // Validate first, then submit
+  submitted: Intent(ValidateFormCommand, SubmitFormCommand),
+
+  // Individual field changes — EventCreator step, no executor needed
+  fieldChanged: Intent(FormEvent.fieldChanged),
+})
+```
+
+### Search with manual cancellation
+
+Use `store.cancel(ref)` to cancel the previous search before starting a new one:
+
+```ts
+const SearchIntents = Intents('Search', {
+  queryChanged: Intent(SearchCommand),
+})
+
+// Cancel the previous search before starting a new one
+let lastRef: IntentRef | undefined
+function onQueryChange(query: string) {
+  if (lastRef) SearchStore.cancel(lastRef)
+  lastRef = SearchStore.send.queryChanged({ query })
+}
+```
+
+For debounce (waiting N ms before executing), handle it in the UI layer or in the executor itself.
+
+## Tips
+
+- **Name intents after user actions.** `plusClicked`, `formSubmitted`, `pageOpened` -- not `incrementCounter` or `saveData`. The intent describes what the user did, not what the system should do.
+- **Use `Intent.allSettled` for independent loads.** If loading currencies, VAT rates, and purchase data are independent, don't let one failure block the others.
+- **One intent per user action.** If a button click should validate then save, that's one intent with two commands, not two intents.
+- **Intents belong to exactly one Store.** You register intents with `.intents()` in the Store builder. The same intent namespace cannot be shared across stores.

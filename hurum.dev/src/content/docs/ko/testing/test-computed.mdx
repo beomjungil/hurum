@@ -1,0 +1,116 @@
+---
+title: "TestComputed"
+description: "특정 상태 입력으로 Computed 값을 테스트해요."
+---
+
+`TestComputed`는 제공하는 원시 상태 객체에 대해 단일 Computed 필드를 평가해요. 계산 함수를 격리해서 테스트해요 -- Store 인스턴스 없이, 구독 없이, Event 없이.
+
+## 설정
+
+```ts
+import { TestComputed } from '@hurum/core/testing'
+import { PurchaseStore } from './store'
+
+const computed = TestComputed(PurchaseStore, 'totalAmount')
+```
+
+`TestComputed`는 Store 정의와 Computed 필드의 이름을 받아요. 필드 이름은 타입 체크돼요 -- Store의 Computed 정의에 존재하지 않는 이름을 전달하면 타입 에러가 발생해요.
+
+## evaluate
+
+원시 상태 객체를 전달하고 Computed 값을 받아요:
+
+```ts
+expect(computed.evaluate({
+  purchase: { items: [{ amount: 100 }, { amount: 200 }] },
+})).toBe(300)
+
+expect(computed.evaluate({
+  purchase: null,
+})).toBe(0)
+```
+
+전달하는 상태 객체는 **원시 상태**예요 -- Computed 값이 없는 Store의 `state` 정의와 동일한 형태. Computed 함수가 이 객체를 받아 파생 값을 반환해요.
+
+## 여러 Computed 필드 테스트
+
+각 필드에 대해 별도의 `TestComputed` 인스턴스를 생성해요:
+
+```ts
+describe('CounterStore computed', () => {
+  it('doubled', () => {
+    const computed = TestComputed(CounterStore, 'doubled')
+
+    expect(computed.evaluate({ count: 5, multiplier: 2 })).toBe(10)
+    expect(computed.evaluate({ count: 0, multiplier: 2 })).toBe(0)
+    expect(computed.evaluate({ count: -3, multiplier: 2 })).toBe(-6)
+  })
+
+  it('product', () => {
+    const computed = TestComputed(CounterStore, 'product')
+
+    expect(computed.evaluate({ count: 3, multiplier: 4 })).toBe(12)
+    expect(computed.evaluate({ count: 0, multiplier: 10 })).toBe(0)
+  })
+})
+```
+
+## 엣지 케이스 테스트
+
+Computed 함수는 종종 null, 빈 배열, 또는 누락된 데이터를 처리해야 해요. TestComputed를 사용하면 이런 케이스를 직접 쉽게 테스트할 수 있어요:
+
+```ts
+describe('CartStore totalPrice', () => {
+  const computed = TestComputed(CartStore, 'totalPrice')
+
+  it('sums item prices', () => {
+    expect(computed.evaluate({
+      items: [
+        { name: 'A', price: 10, quantity: 2 },
+        { name: 'B', price: 5, quantity: 1 },
+      ],
+    })).toBe(25)
+  })
+
+  it('returns 0 for empty cart', () => {
+    expect(computed.evaluate({ items: [] })).toBe(0)
+  })
+
+  it('handles single item', () => {
+    expect(computed.evaluate({
+      items: [{ name: 'A', price: 42, quantity: 1 }],
+    })).toBe(42)
+  })
+})
+```
+
+## 에러 처리
+
+Store의 Computed 정의에 존재하지 않는 필드 이름을 전달하면 `evaluate`가 throw해요:
+
+```ts
+// @ts-expect-error -- 'nonExistent' is not a valid computed field
+const computed = TestComputed(CounterStore, 'nonExistent')
+computed.evaluate({ count: 0 })
+// Error: Computed field "nonExistent" not found in store.
+```
+
+Store에 Computed 정의가 전혀 없는 경우:
+
+```ts
+const computed = TestComputed(StoreWithNoComputed, 'anything')
+// Error: Store has no computed definition. Cannot test computed field "anything".
+```
+
+## Computed 값을 별도로 테스트하는 이유
+
+Computed 함수는 순수해요 -- 상태를 받아 파생 값을 반환해요. 직접 테스트하면:
+
+- **Store 설정이 필요 없어요.** 계산을 테스트하기 위해 Event, Executor, Intent가 필요 없어요.
+- **경계 테스트가 쉬워요.** 정상 흐름으로는 도달하기 어려운 엣지 케이스를 포함해서 어떤 상태 형태든 전달할 수 있어요.
+- **명확한 실패 메시지.** Computed 테스트가 실패하면 어떤 계산이 잘못되었고 어떤 입력이 원인인지 정확히 알 수 있어요.
+
+## 다음 단계
+
+- [TestReducer](/ko/testing/test-reducer/) -- on() 핸들러를 순수 함수로 테스트
+- [TestIntent](/ko/testing/test-intent/) -- Intent Command 구성 검증

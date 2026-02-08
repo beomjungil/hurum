@@ -1,0 +1,200 @@
+---
+title: useStore
+description: "useStore 훅의 API 레퍼런스예요."
+---
+
+```ts
+import { useStore } from '@hurum/react'
+```
+
+## `useStore(storeDefinition)`
+
+컨텍스트 인식 훅으로, 세분화된 구독 훅이 포함된 Store 핸들을 반환해요.
+
+### 시그니처
+
+```ts
+function useStore<TDeps, TRawState, TComputed, TIntents>(
+  def: StoreDefinition<TDeps, TRawState, TComputed, TIntents>,
+): UseStoreReturn<TRawState, TComputed, TIntents>
+```
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `def` | `StoreDefinition` | Store 정의 (빌더 객체). |
+
+### 반환값
+
+`UseStoreReturn` 객체.
+
+### 해석 동작
+
+- **`StoreProvider` 내부**: 가장 가까운 매칭 Provider의 스코프된 인스턴스를 반환해요.
+- **`StoreProvider` 외부**: 글로벌 싱글턴 인스턴스로 폴백해요 (첫 접근 시 생성).
+
+---
+
+## `useStore(instance)`
+
+`StoreInstance`를 직접 받는 오버로드예요. 동일한 훅과 메서드를 가진 안정적인 `UseStoreReturn` 핸들로 감싸요.
+
+### 시그니처
+
+```ts
+function useStore<TDeps, TRawState, TComputed, TIntents>(
+  instance: StoreInstance<TDeps, TRawState, TComputed, TIntents>,
+): UseStoreReturn<TRawState, TComputed, TIntents>
+```
+
+### 매개변수
+
+| 매개변수 | 타입 | 설명 |
+|-----------|------|-------------|
+| `instance` | `StoreInstance` | `StoreDef.create()`로 생성한 Store 인스턴스. |
+
+### 반환값
+
+주어진 인스턴스에 바인딩된 `UseStoreReturn` 객체.
+
+### 예제
+
+```tsx
+function CartPage({ store }: { store: StoreInstance }) {
+  const cart = useStore(store)
+  const items = cart.use.items()
+  return <div>{items.length} items</div>
+}
+```
+
+이 오버로드는 이미 Store 인스턴스에 대한 참조를 가지고 있을 때 (예: prop으로 전달받았거나 부모 컴포넌트에서 생성한 경우) 컨텍스트를 거치지 않고 훅 기반 API를 사용하고 싶을 때 유용해요.
+
+---
+
+## `UseStoreReturn`
+
+`useStore()`가 반환하는 객체예요.
+
+### 훅
+
+| 속성 | 타입 | 설명 |
+|----------|------|-------------|
+| `use` | `{ [field]: () => value }` | 프록시 객체. 각 속성은 단일 상태 필드를 구독하는 훅이에요. |
+| `useSelector` | `(fn: (state) => T) => T` | 구조적 동등성 메모이제이션을 사용하는 파생 상태 훅. |
+| `useSelector` | `(selector: Selector<T>) => T` | `store.selector()`로 미리 생성한 `Selector` 객체도 받을 수 있어요. |
+
+### 메서드
+
+| 메서드 | 타입 | 설명 |
+|--------|------|-------------|
+| `send` | `SendFn<TIntents>` | Intent를 디스패치해요. PreparedIntent, 이름 단축키, 레거시 형식을 지원해요. |
+| `cancel` | `(ref: IntentRef) => void` | 특정 Intent를 취소해요. |
+| `cancelAll` | `() => void` | 모든 실행 중인 Intent를 취소해요. |
+| `getState` | `() => State` | 전체 결합된 상태를 읽어요. |
+| `subscribe` | `(cb) => unsubscribe` | 상태 변경을 구독해요. |
+| `subscribe` | `('events', cb) => unsubscribe` | Event 발행을 구독해요. |
+| `dispose` | `() => void` | Store 인스턴스를 해제해요. |
+| `scope` | `ScopeOf<TRawState>` | Nested 자식 Store 인스턴스에 접근해요. |
+
+---
+
+## `use.*` 훅
+
+`use` 프록시는 상태 필드당 하나의 훅을 제공해요 (Computed 필드 및 해석된 Nested 상태 포함). 각 훅은 `useSyncExternalStore`를 사용해서 해당 필드를 구독해요.
+
+```tsx
+function CartSummary() {
+  const cart = useStore(CartStore)
+
+  const items = cart.use.items()
+  const total = cart.use.total()  // computed field
+
+  return (
+    <div>
+      <span>{items.length} items</span>
+      <span>${total.toFixed(2)}</span>
+    </div>
+  )
+}
+```
+
+훅은 지연 생성되고 캐시돼요. `use.fieldName`에 접근하면 항상 동일한 훅 함수를 반환해요.
+
+---
+
+## `useSelector`
+
+구조적 동등성으로 상태를 파생해요. 파생된 값이 변경될 때만 컴포넌트가 리렌더링돼요.
+
+### 인라인 함수 사용
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const count = cart.useSelector((state) => state.items.length)
+
+  return <span>{count}</span>
+}
+```
+
+### 미리 생성한 Selector 사용
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const selector = useMemo(() => store.selector((s) => s.items.length), [store])
+  const count = cart.useSelector(selector)
+
+  return <span>{count}</span>
+}
+```
+
+내부적으로 구조적 동등성이 사용돼요: 파생된 값이 동일한 내용의 객체나 배열이면 리렌더링을 방지하기 위해 이전 참조가 유지돼요.
+
+---
+
+## 전체 예제
+
+```tsx
+import { useStore } from '@hurum/react'
+import { CartStore, CartIntents } from './cart-store'
+
+function CartPage() {
+  const cart = useStore(CartStore)
+
+  const items = cart.use.items()
+  const total = cart.use.total()
+  const isLoading = cart.use.isLoading()
+
+  const handleCheckout = () => {
+    cart.send.checkout({ items })
+  }
+
+  const handleClear = () => {
+    cart.send(CartIntents.clear({}))
+  }
+
+  if (isLoading) return <Spinner />
+
+  return (
+    <div>
+      {items.map((item) => (
+        <CartItem key={item.id} item={item} />
+      ))}
+      <p>Total: ${total.toFixed(2)}</p>
+      <button onClick={handleCheckout}>Checkout</button>
+      <button onClick={handleClear}>Clear</button>
+    </div>
+  )
+}
+```
+
+---
+
+## 참고사항
+
+- `useStore`는 리렌더링 간에 안정적이에요. 반환된 객체는 메모이제이션되며, 기본 Store 인스턴스가 변경될 때만 바뀌어요 (예: Provider 전환 시).
+- `use.*` 훅은 내부적으로 `useSyncExternalStore`를 사용해요. React 18 동시성 기능과 호환돼요.
+- `use.*` 훅을 조건부로 호출하지 마세요. React 훅이므로 훅의 규칙을 따라야 해요.
+- `send` 속성은 Store의 send 프록시 자체예요 -- Intent 이름 단축키가 유지돼요.

@@ -1,0 +1,108 @@
+---
+title: Hurum
+description: TypeScript 애플리케이션을 위한 예측 가능한 상태 머신.
+template: splash
+hero:
+  title: '<img class="light:sl-hidden" src="/wordmark-dark.svg" alt="HURUM" /><img class="dark:sl-hidden" src="/wordmark-light.svg" alt="HURUM" />'
+  tagline: TypeScript를 위한 예측 가능한 상태 머신. 모든 상태 변경이 하나의 경로를 따라요.
+  image:
+    dark: ../../../assets/icon-dark.svg
+    light: ../../../assets/icon-light.svg
+    alt: Hurum
+  actions:
+    - text: 시작하기
+      link: /ko/getting-started/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: GitHub에서 보기
+      link: https://github.com/beomjungil/hurum
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## 왜 Hurum인가?
+
+<CardGrid stagger>
+  <Card title="단일 경로" icon="rocket">
+    모든 상태 변경은 Intent → Command → Executor → Event → Store를 거쳐요. 지름길도, 예외도 없어요.
+  </Card>
+  <Card title="예측 가능" icon="approve-check">
+    Event는 사실을 기록해요. 상태 전이는 순수 함수예요. 무엇이 일어났고 왜 일어났는지 항상 알 수 있어요.
+  </Card>
+  <Card title="TypeScript 우선" icon="seti:typescript">
+    executor 입력부터 Event 페이로드까지 완전한 타입 추론. 수동 타입 어노테이션이 필요 없어요.
+  </Card>
+  <Card title="모든 레이어에서 테스트 가능" icon="puzzle">
+    다섯 가지 테스트 유틸리티가 특정 레이어를 대상으로 해요: TestStore, TestExecutor, TestReducer, TestComputed, TestIntent.
+  </Card>
+</CardGrid>
+
+## 데이터 흐름
+
+```
+Intent (사용자가 하고 싶은 것)
+  → Command (실행할 것)
+    → CommandExecutor (사이드 이펙트 경계)
+      → emit(Event) (일어난 일을 기록)
+        → Store.on (순수 상태 전이)
+          → Computed (파생 상태, 즉시 재계산)
+            → 구독자 알림
+```
+
+단순한 카운터 증가든 에러 처리가 포함된 복잡한 비동기 API 호출이든, 모든 상태 변경은 이 정확한 경로를 따라요.
+
+## 패키지
+
+| 패키지 | 설명 |
+|---------|-------------|
+| `@hurum/core` | 핵심 상태 관리. 프레임워크 무관, 의존성 제로. |
+| `@hurum/react` | React 바인딩: `Provider`, `useStore`, `Store.use.*`, `withProvider`. |
+
+## 빠른 예제
+
+```ts
+import { Store, Events, Event, CommandExecutor, Intents, Intent } from '@hurum/core'
+
+// 1. Define events (what happened)
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+})
+
+// 2. Define executor (side-effect boundary)
+const [IncrementCommand, IncrementExecutor] = CommandExecutor<
+  { amount: number }
+>((command, { emit }) => {
+  emit(CounterEvent.incremented(command))
+})
+
+// 3. Define intent (what the user wants)
+const CounterIntents = Intents('Counter', {
+  plusClicked: Intent(IncrementCommand),
+})
+
+// 4. Define store (state + transitions + everything)
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, { incremented: (state, { amount }) => ({ ...state, count: state.count + amount }) })
+  .computed({ doubled: (state) => state.count * 2 })
+  .intents(CounterIntents)
+  .executors(IncrementExecutor)
+```
+
+```tsx
+// 5. Use in React
+function Counter() {
+  const count = CounterStore.use.count()
+  const doubled = CounterStore.use.doubled()
+
+  return (
+    <div>
+      <p>{count} (doubled: {doubled})</p>
+      <button onClick={() => CounterStore.send.plusClicked({ amount: 1 })}>+1</button>
+    </div>
+  )
+}
+```
+
+[시작하기 →](/ko/getting-started/introduction/)

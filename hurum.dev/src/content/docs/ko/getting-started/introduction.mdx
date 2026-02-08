@@ -1,0 +1,95 @@
+---
+title: "Hurum이란?"
+description: "Hurum은 모든 상태 변경이 하나의 예측 가능한 경로를 따르는 TypeScript 상태 관리 라이브러리예요: Intent → Command → Executor → Event → Store.on."
+---
+
+"Hurum"이라는 이름은 한국어 **흐름**에서 따왔어요. Hurum에서 모든 상태는 하나의 파이프라인을 따라 흘러요. 그 끊기지 않는 흐름이 애플리케이션을 예측 가능하게 만들어요.
+
+Hurum은 **모든 상태 변경이 하나의 경로를 따르는** TypeScript 상태 관리 라이브러리예요:
+
+```
+Intent → Command → Executor → Event → Store.on
+```
+
+카운터 증가와 재시도 및 에러 처리가 포함된 복잡한 비동기 API 호출이 정확히 같은 파이프라인을 거쳐요. 지름길도 없고, 특별한 케이스도 없어요.
+
+## 원칙
+
+### 단일 경로
+
+모든 상태 변경은 Intent → Command → Executor → Event → Store.on을 거쳐요. 단순한 동기 토글과 여러 단계의 비동기 워크플로우가 같은 경로를 따라요. 하나의 패턴만 배우면 어디에서나 적용할 수 있다는 뜻이에요.
+
+### 캡슐화 일관성
+
+숫자를 증가시키는 버튼 클릭이든 데이터를 가져와서 검증하고 여러 필드를 업데이트하는 API 호출이든 -- 아키텍처는 동일해요. "이건 리듀서로 해야 하나, 이펙트로 해야 하나, middleware로 해야 하나?"를 고민할 필요가 없어요. 답은 항상 같은 파이프라인이에요.
+
+### 명시성
+
+Event는 **일어난 사실**을 기록해요. `CounterEvent.incremented({ amount: 1 })`는 사실이에요 -- 카운터가 1만큼 증가되었어요. `Store.on`의 상태 전이는 이런 사실에 반응하는 순수 함수예요. 암묵적인 변이도, 마법의 setter도, "값을 직접 업데이트하기"도 없어요.
+
+### 응집성
+
+하나의 프로세스에 속하는 모든 것이 하나의 Store 정의에 있어요: 상태 구조, Event 핸들러, Computed 값, 의존성, executor. 리듀서, 셀렉터, middleware, 이펙트를 위해 별도의 파일에 로직을 흩어놓을 필요가 없어요. 하나의 Store, 하나의 찾아볼 곳.
+
+## 패키지
+
+| 패키지 | 하는 일 |
+|---|---|
+| `@hurum/core` | 핵심 상태 관리. 프레임워크 무관, 런타임 의존성 제로. TypeScript가 동작하는 어디에서든 작동해요. |
+| `@hurum/react` | React 바인딩: `useStore`, `Store.use.*` 훅, `Provider`, `withProvider`. React 18+를 peer dependency로 가져요. |
+
+React를 사용하지 않거나, 프레임워크 간에 상태 로직을 공유하고 싶다면 `@hurum/core`만 단독으로 사용하세요. React 컴포넌트 통합이 필요할 때 `@hurum/react`를 추가하세요.
+
+## 누구를 위한 건가요?
+
+Hurum은 앱에 다음과 같은 요소가 있을 때 가장 잘 맞아요:
+
+- **복잡한 비동기 흐름** -- 검증, 재시도, 낙관적 업데이트, 롤백이 포함된 API 호출
+- **다단계 프로세스** -- 위자드, 결제 흐름, 사이드 이펙트가 있는 폼 제출
+- **Nested 상태** -- 부모-자식 Store 관계 (예: 각 todo 항목이 자체 Store를 가지는 todo 리스트)
+- **명시적 아키텍처를 원하는 팀** -- "이 로직은 어디에 넣어야 하지?"에 하나의 명확한 답이 있어야 할 때
+
+## Hurum을 사용하지 말아야 할 때
+
+전역 카운터나 단순한 boolean 토글만 필요하다면 Hurum은 과해요. 단순한 경우에는 `useState`, Zustand, 또는 Jotai를 사용하세요. Hurum의 가치는 **복잡한** 상태 관리가 요구하는 예측 가능성과 구조에서 나와요 -- 그리고 그 구조는 사소한 사용 사례에는 비용이 돼요.
+
+## 데이터 흐름 한눈에 보기
+
+모든 상태 변경이 거치는 전체 파이프라인이에요:
+
+```
+Intent (사용자가 하고 싶은 것)
+  → Command (실행할 것)
+    → CommandExecutor (사이드 이펙트 경계)
+      → emit(Event) (일어난 일을 기록)
+        → Store.on (순수 상태 전이)
+          → Computed (파생 상태, 즉시 재계산)
+            → 구독자 알림 (React 리렌더)
+```
+
+각 레이어는 하나의 역할을 해요. Intent는 사용자 액션을 Command에 매핑해요. Executor는 사이드 이펙트를 실행하고 Event를 emit해요. Event는 사실이에요. Store.on은 상태 전이를 처리해요. Computed는 값을 파생해요. 이 분리가 Hurum Store를 테스트, 디버그, 이해하기 쉽게 만드는 거예요.
+
+## Hurum 코드는 어떻게 생겼나요?
+
+최소한의 카운터 예제예요 -- Event와 Store만 있으면 돼요:
+
+```ts
+import { Events, Event, Store } from '@hurum/core'
+
+// Events record facts: "the counter was incremented"
+const CounterEvent = Events('Counter', {
+  incremented: Event<{ amount: number }>(),
+  reset: Event<{}>(),
+})
+
+// Store holds state and reacts to events with pure functions
+const CounterStore = Store({ state: { count: 0 } })
+  .on(CounterEvent, {
+    incremented: (state, { amount }) => ({ ...state, count: state.count + amount }),
+    reset: () => ({ count: 0 }),
+  })
+```
+
+이게 전부예요. Event는 무엇이 일어날 수 있는지 정의해요. Store의 `.on()` 핸들러는 그에 반응해서 상태가 어떻게 바뀌는지 정의해요. 그 외의 모든 것 -- executor, intent, computed 값, middleware -- 은 이 토대 위에 쌓여요.
+
+시작할 준비가 되셨나요? [Hurum 설치하기](/ko/getting-started/installation/)에서 첫 번째 Store를 만들어보세요.

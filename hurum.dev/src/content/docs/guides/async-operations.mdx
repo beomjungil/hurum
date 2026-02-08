@@ -1,0 +1,225 @@
+---
+title: "Async Operations"
+description: "Handle API calls, loading states, and error flows with CommandExecutor."
+---
+
+> [!TIP] Before reading
+> This guide builds on [Quick Start](/getting-started/quick-start/) and [CommandExecutor](/concepts/command-executor/). Read those first if you haven't.
+
+Most real applications need async operations: API calls, file uploads, WebSocket messages. In Hurum, async logic lives inside a `CommandExecutor`. The executor emits events as things happen, and `Store.on` handlers transition state in response.
+
+Every async operation follows the same pattern: emit a "requested" event, do the work, then emit either a success or failure event.
+
+## The async CRUD pattern
+
+Here is a complete purchase save flow. Start with the events:
+
+```ts
+import { Events, Event } from '@hurum/core'
+
+interface Purchase {
+  id: string
+  name: string
+  amount: number
+}
+
+interface SaveError {
+  code: string
+  message: string
+}
+
+const PurchaseEvent = Events('Purchase', {
+  saveRequested: Event<{ id: string }>(),
+  saved: Event<{ purchase: Purchase }>(),
+  saveFailed: Event<{ error: SaveError }>(),
+})
+```
+
+Three events, one for each phase: the operation started, it succeeded, or it failed. These are facts that will be recorded regardless of what the UI looks like.
+
+## The executor
+
+The executor does the actual work. It declares the command input type as the first type parameter, and its dependencies as the second:
+
+```ts
+import { CommandExecutor } from '@hurum/core'
+
+interface PurchaseRepository {
+  save(purchase: Purchase): Promise<Result<Purchase, SaveError>>
+}
+
+const [SavePurchaseCommand, SavePurchaseExecutor] = CommandExecutor<
+  { purchase: Purchase },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  // 1. Emit "requested" immediately — this sets the loading state
+  emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+
+  // 2. Check if we were cancelled before starting the network call
+  if (signal.aborted) return
+
+  // 3. Do the async work
+  const result = await deps.purchaseRepository.save(command.purchase)
+
+  // 4. Check again after the await — the user may have cancelled while waiting
+  if (signal.aborted) return
+
+  // 5. Emit success or failure
+  result.match(
+    (saved) => emit(PurchaseEvent.saved({ purchase: saved })),
+    (error) => emit(PurchaseEvent.saveFailed({ error })),
+  )
+})
+```
+
+Notice the `signal.aborted` checks. These are the cancellation checkpoints. If the user navigates away or clicks "Cancel" while the save is in progress, the signal gets aborted and the executor stops emitting events.
+
+## The store
+
+The store handles each event with a pure state transition:
+
+```ts
+import { Store, Intents, Intent } from '@hurum/core'
+
+const PurchaseIntents = Intents('Purchase', {
+  saveClicked: Intent(SavePurchaseCommand),
+})
+
+const PurchaseStore = Store({
+  state: {
+    purchase: null as Purchase | null,
+    saving: false,
+    error: null as SaveError | null,
+  },
+})
+  .on(PurchaseEvent, {
+    saveRequested: (state) => ({
+      ...state,
+      saving: true,
+      error: null,
+    }),
+    saved: (state, { purchase }) => ({
+      ...state,
+      purchase,
+      saving: false,
+    }),
+    saveFailed: (state, { error }) => ({
+      ...state,
+      saving: false,
+      error,
+    }),
+  })
+  .intents(PurchaseIntents)
+  .executors(SavePurchaseExecutor)
+  .deps<{ purchaseRepository: PurchaseRepository }>()
+```
+
+Each `on` handler is a pure function. `saveRequested` sets the loading flag. `saved` stores the result and clears loading. `saveFailed` stores the error and clears loading. Simple, predictable, testable.
+
+## Using it in React
+
+```tsx
+import { useStore } from '@hurum/react'
+
+function SaveButton() {
+  const store = useStore(PurchaseStore)
+  const saving = store.use.saving()
+  const error = store.use.error()
+
+  const handleSave = () => {
+    store.send.saveClicked({ purchase: { id: '1', name: 'Widget', amount: 100 } })
+  }
+
+  return (
+    <div>
+      <button onClick={handleSave} disabled={saving}>
+        {saving ? 'Saving...' : 'Save'}
+      </button>
+      {error && <p className="error">{error.message}</p>}
+    </div>
+  )
+}
+```
+
+## Key points
+
+### Always emit "requested" first
+
+The first thing your executor should do is emit a "requested" or "started" event. This lets the store transition to a loading state immediately, before any async work begins. The UI updates right away.
+
+```ts
+// Good — UI shows loading immediately
+emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+const result = await deps.purchaseRepository.save(command.purchase)
+
+// Bad — UI stays in previous state until the API responds
+const result = await deps.purchaseRepository.save(command.purchase)
+emit(PurchaseEvent.saved({ purchase: result }))
+```
+
+### emit is synchronous
+
+When you call `emit()`, the event is applied to the store immediately and synchronously. State listeners are notified before `emit()` returns. This means if you call `getState()` right after `emit()`, it reflects the updated state:
+
+```ts
+emit(PurchaseEvent.saveRequested({ id: command.purchase.id }))
+// getState().saving is now true
+```
+
+### Check signal.aborted around every await
+
+Each `await` is a point where the operation might have been cancelled. Always check `signal.aborted` before emitting events after an async boundary:
+
+```ts
+const data = await deps.api.fetchData()
+if (signal.aborted) return  // Don't emit if cancelled
+
+const processed = await deps.processor.transform(data)
+if (signal.aborted) return  // Check again after second await
+
+emit(DataEvent.processed({ data: processed }))
+```
+
+### One executor per side-effect
+
+Keep executors focused on a single operation. If your "save" needs to validate first, use [sequential intents](/guides/error-handling/) instead of putting validation inside the save executor:
+
+```ts
+const PurchaseIntents = Intents('Purchase', {
+  submitClicked: Intent(ValidateCommand, SavePurchaseCommand),
+})
+```
+
+This keeps each executor small and testable, and gives you a clear cancellation point between steps.
+
+## Loading a resource
+
+The same pattern works for reads. Here is a fetch executor:
+
+```ts
+const PurchaseEvent = Events('Purchase', {
+  loadRequested: Event<{ id: string }>(),
+  loaded: Event<{ purchase: Purchase }>(),
+  loadFailed: Event<{ error: Error }>(),
+})
+
+const [LoadPurchaseCommand, LoadPurchaseExecutor] = CommandExecutor<
+  { id: string },
+  { purchaseRepository: PurchaseRepository }
+>(async (command, { deps, emit, signal }) => {
+  emit(PurchaseEvent.loadRequested({ id: command.id }))
+
+  if (signal.aborted) return
+
+  try {
+    const purchase = await deps.purchaseRepository.findById(command.id)
+    if (signal.aborted) return
+    emit(PurchaseEvent.loaded({ purchase }))
+  } catch (error) {
+    if (signal.aborted) return
+    emit(PurchaseEvent.loadFailed({ error: error as Error }))
+  }
+})
+```
+
+The structure is identical: requested, then success or failure. Once you learn this pattern, it applies to every async operation in your app.

@@ -1,0 +1,200 @@
+---
+title: useStore
+description: "API reference for the useStore hook."
+---
+
+```ts
+import { useStore } from '@hurum/react'
+```
+
+## `useStore(storeDefinition)`
+
+Context-aware hook that returns a store handle with granular subscription hooks.
+
+### Signature
+
+```ts
+function useStore<TDeps, TRawState, TComputed, TIntents>(
+  def: StoreDefinition<TDeps, TRawState, TComputed, TIntents>,
+): UseStoreReturn<TRawState, TComputed, TIntents>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `def` | `StoreDefinition` | The store definition (the builder object). |
+
+### Returns
+
+A `UseStoreReturn` object.
+
+### Resolution Behavior
+
+- **Inside a `StoreProvider`**: Returns the scoped instance from the nearest matching provider.
+- **Outside a `StoreProvider`**: Falls back to the global singleton instance (created on first access).
+
+---
+
+## `useStore(instance)`
+
+Overload that accepts a `StoreInstance` directly. Wraps it in a stable `UseStoreReturn` handle with the same hooks and methods.
+
+### Signature
+
+```ts
+function useStore<TDeps, TRawState, TComputed, TIntents>(
+  instance: StoreInstance<TDeps, TRawState, TComputed, TIntents>,
+): UseStoreReturn<TRawState, TComputed, TIntents>
+```
+
+### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `instance` | `StoreInstance` | A store instance created via `StoreDef.create()`. |
+
+### Returns
+
+A `UseStoreReturn` object bound to the given instance.
+
+### Example
+
+```tsx
+function CartPage({ store }: { store: StoreInstance }) {
+  const cart = useStore(store)
+  const items = cart.use.items()
+  return <div>{items.length} items</div>
+}
+```
+
+This overload is useful when you already have a reference to a store instance (e.g. passed as a prop or created in a parent component) and want to use the hook-based API without going through context.
+
+---
+
+## `UseStoreReturn`
+
+The object returned by `useStore()`.
+
+### Hooks
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `use` | `{ [field]: () => value }` | Proxy object. Each property is a hook that subscribes to a single state field. |
+| `useSelector` | `(fn: (state) => T) => T` | Derived state hook with structural equality memoization. |
+| `useSelector` | `(selector: Selector<T>) => T` | Also accepts a pre-built `Selector` object from `store.selector()`. |
+
+### Methods
+
+| Method | Type | Description |
+|--------|------|-------------|
+| `send` | `SendFn<TIntents>` | Dispatch intents. Supports PreparedIntent, named shortcuts, and legacy form. |
+| `cancel` | `(ref: IntentRef) => void` | Cancel a specific intent. |
+| `cancelAll` | `() => void` | Cancel all running intents. |
+| `getState` | `() => State` | Read full combined state. |
+| `subscribe` | `(cb) => unsubscribe` | Subscribe to state changes. |
+| `subscribe` | `('events', cb) => unsubscribe` | Subscribe to event emissions. |
+| `dispose` | `() => void` | Dispose the store instance. |
+| `scope` | `ScopeOf<TRawState>` | Access nested child store instances. |
+
+---
+
+## `use.*` Hooks
+
+The `use` proxy provides one hook per state field (including computed fields and resolved nested state). Each hook subscribes to that specific field using `useSyncExternalStore`.
+
+```tsx
+function CartSummary() {
+  const cart = useStore(CartStore)
+
+  const items = cart.use.items()
+  const total = cart.use.total()  // computed field
+
+  return (
+    <div>
+      <span>{items.length} items</span>
+      <span>${total.toFixed(2)}</span>
+    </div>
+  )
+}
+```
+
+Hooks are created lazily and cached. Accessing `use.fieldName` always returns the same hook function.
+
+---
+
+## `useSelector`
+
+Derives state with structural equality. The component re-renders only when the derived value changes.
+
+### With inline function
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const count = cart.useSelector((state) => state.items.length)
+
+  return <span>{count}</span>
+}
+```
+
+### With pre-built Selector
+
+```tsx
+function CartBadge() {
+  const cart = useStore(CartStore)
+  const selector = useMemo(() => store.selector((s) => s.items.length), [store])
+  const count = cart.useSelector(selector)
+
+  return <span>{count}</span>
+}
+```
+
+Structural equality is used internally: if the derived value is an object or array with the same content, the previous reference is kept to avoid re-renders.
+
+---
+
+## Full Example
+
+```tsx
+import { useStore } from '@hurum/react'
+import { CartStore, CartIntents } from './cart-store'
+
+function CartPage() {
+  const cart = useStore(CartStore)
+
+  const items = cart.use.items()
+  const total = cart.use.total()
+  const isLoading = cart.use.isLoading()
+
+  const handleCheckout = () => {
+    cart.send.checkout({ items })
+  }
+
+  const handleClear = () => {
+    cart.send(CartIntents.clear({}))
+  }
+
+  if (isLoading) return <Spinner />
+
+  return (
+    <div>
+      {items.map((item) => (
+        <CartItem key={item.id} item={item} />
+      ))}
+      <p>Total: ${total.toFixed(2)}</p>
+      <button onClick={handleCheckout}>Checkout</button>
+      <button onClick={handleClear}>Clear</button>
+    </div>
+  )
+}
+```
+
+---
+
+## Notes
+
+- `useStore` is stable across re-renders. The returned object is memoized and only changes if the underlying store instance changes (e.g. when switching providers).
+- `use.*` hooks use `useSyncExternalStore` under the hood. They are compatible with React 18 concurrent features.
+- Do not call `use.*` hooks conditionally. They are React hooks and must follow the rules of hooks.
+- The `send` property is the store's send proxy directly -- it retains intent name shortcuts.
